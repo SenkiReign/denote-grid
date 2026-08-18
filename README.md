@@ -39,7 +39,6 @@ When in the `*denote-grid*` buffer:
 | Key | Action |
 | :--- | :--- |
 | `RET` / `mouse-1` | Open file directly in Emacs |
-| `&` | Open file with async shell command (e.g., `mpv`, `mupdf`) |
 | `d` | Jump to file location in Dired |
 | `/` | Filter items (supports plain text substring, `#tag`, or `#tag1 tag2`) |
 | `s` | Cycle sort key (`date` → `title` → `tags` → `type`) |
