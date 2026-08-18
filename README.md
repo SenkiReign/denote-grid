@@ -10,7 +10,7 @@ It transforms denote directory into an Are.na style visual grid/moodboard inside
 * **Cluster view:** Groups linked notes together
 * **Filtered view:** Filter/query based on tags or substring
 
-### Thumbnail gemeration
+### Thumbnail generation
 * **Image Files:** Native Emacs image scaling (zero dependencies).
 * **Notes (`.md`, `.org`, `.txt`):** Synthesizes a small SVG "card" on the fly using title, body snippet, and tags (uses `svg.el`, built into Emacs 27+).
 * **Video Files:** Frame thumbnail generated via `ffmpeg` (if installed).
