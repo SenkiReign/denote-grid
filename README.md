@@ -1,6 +1,6 @@
 # denote-grid.el
 
-It transforms denote directory into an Are.na style visual grid/moodboard inside emacs.
+It transforms [denote](https://github.com/protesilaos/denote) directory into an Are.na style visual grid/moodboard inside emacs.
 
 <img width="1379" height="942" alt="gridlight" src="https://github.com/user-attachments/assets/6817a495-5061-4120-a76d-068f11768d32" />
 
