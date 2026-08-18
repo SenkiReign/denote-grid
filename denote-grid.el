@@ -1,7 +1,7 @@
 ;;; denote-grid.el --- An are.na-style grid for denote -*- lexical-binding: t; -*-
 
 ;; Author:  Senki R.
-;; Keywords: denote, notes, multimedia, moodboard
+;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
 ;; Version: 0.1.0
 
@@ -9,7 +9,7 @@
 
 ;; denote-grid.el turns a denote directory (or, more usefully, whatever
 ;; files are currently visible in a `dired'/`denote-dired' buffer) into
-;; a wrapped thumbnail grid, are.na-moodboard style. Pure Emacs:
+;; a wrapped thumbnail grid, are.na-moodboard style in emacs.
 ;;
 ;;   - image files    -> native Emacs image scaling (no deps)
 ;;   - notes (md/org/txt) -> a small SVG "card" synthesized on the fly
