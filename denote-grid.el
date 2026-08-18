@@ -29,7 +29,6 @@
 ;;
 ;; In the grid buffer:
 ;;   RET / mouse-1   open file in Emacs
-;;   &               open file with async shell command (mpv, mupdf, etc.)
 ;;   d               jump to this file in dired
 ;;   /               filter (plain substring, or "#tag" / "#tag1 tag2")
 ;;   s               cycle sort key (date / title / tags / type)
@@ -43,8 +42,6 @@
 (require 'cl-lib)
 (require 'svg)
 (require 'dired)
-(require 'dired-x)
-(require 'dired-aux)
 
 ;;;; User options
 
@@ -415,7 +412,6 @@
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "RET") #'denote-grid-open-at-point)
     (define-key m [mouse-1] #'denote-grid-open-at-point)
-    (define-key m (kbd "&") #'denote-grid-async-shell-command)
     (define-key m (kbd "d") #'denote-grid-jump-to-dired)
     (define-key m (kbd "/") #'denote-grid-filter)
     (define-key m (kbd "s") #'denote-grid-sort-cycle)
@@ -614,16 +610,6 @@
   (interactive)
   (if-let ((it (get-text-property (point) 'denote-grid-item)))
       (find-file (denote-grid-item-path it))
-    (user-error "No item at point")))
-
-(defun denote-grid-async-shell-command ()
-  "Run Dired's async shell command (&) on the item under point."
-  (interactive)
-  (if-let ((it (get-text-property (point) 'denote-grid-item)))
-      (let* ((path (denote-grid-item-path it))
-             (files (list path))
-             (cmd (dired-read-shell-command "& on %s: " nil files)))
-        (dired-do-async-shell-command cmd nil files))
     (user-error "No item at point")))
 
 (defun denote-grid-jump-to-dired ()
