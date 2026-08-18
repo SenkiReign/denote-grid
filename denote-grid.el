@@ -119,7 +119,7 @@
 (defconst denote-grid--id-re "[0-9]\\{8\\}T[0-9]\\{6\\}")
 
 (cl-defstruct denote-grid-item
-  id title tags path type mtime snippet)
+  id title tags path type mtime snippet-fetched snippet)
 
 (defun denote-grid--file-type (ext)
   "Classify file extension EXT into a symbol."
@@ -147,6 +147,16 @@
             (substring body 0 (min (length body) denote-grid-note-snippet-length)))))
     (error "")))
 
+(defun denote-grid--get-snippet (item)
+  "Lazy-fetch snippet text for note ITEM only when required."
+  (unless (denote-grid-item-snippet-fetched item)
+    (setf (denote-grid-item-snippet item)
+          (if (eq (denote-grid-item-type item) 'text)
+              (denote-grid--snippet (denote-grid-item-path item))
+            ""))
+    (setf (denote-grid-item-snippet-fetched item) t))
+  (denote-grid-item-snippet item))
+
 (defun denote-grid--parse-file (path)
   "Parse PATH into a `denote-grid-item'."
   (let* ((name (file-name-nondirectory path))
@@ -160,7 +170,7 @@
              (mtime (float-time (file-attribute-modification-time (file-attributes path)))))
         (make-denote-grid-item
          :id id :title title :tags tags :path path :type type :mtime mtime
-         :snippet (if (eq type 'text) (denote-grid--snippet path) ""))))))
+         :snippet-fetched nil :snippet "")))))
 
 ;;;; Collecting files
 
@@ -270,7 +280,7 @@
     (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 24 nil nil "…")
               :x 16 :y 26 :fill fg :font-size 15 :font-weight "bold" :font-family "sans-serif")
     (let ((y 48))
-      (dolist (line (denote-grid--wrap-text (denote-grid-item-snippet item) 32))
+      (dolist (line (denote-grid--wrap-text (denote-grid--get-snippet item) 32))
         (when (< y (- h 22))
           (svg-text svg line :x 16 :y y :fill muted :font-size 11 :font-family "sans-serif")
           (setq y (+ y 15)))))
@@ -416,15 +426,11 @@
     (define-key m (kbd "<right>") #'denote-grid-next-card)
     (define-key m (kbd "TAB") #'denote-grid-next-card)
     (define-key m (kbd "n") #'denote-grid-next-card)
-    (define-key m (kbd "l") #'denote-grid-next-card)
     (define-key m (kbd "<left>") #'denote-grid-prev-card)
     (define-key m (kbd "<backtab>") #'denote-grid-prev-card)
     (define-key m (kbd "p") #'denote-grid-prev-card)
-    (define-key m (kbd "h") #'denote-grid-prev-card)
     (define-key m (kbd "<down>") #'denote-grid-down-card)
-    (define-key m (kbd "j") #'denote-grid-down-card)
     (define-key m (kbd "<up>") #'denote-grid-up-card)
-    (define-key m (kbd "k") #'denote-grid-up-card)
     m))
 
 (define-derived-mode denote-grid-mode special-mode "Denote-Grid"
@@ -482,7 +488,7 @@
           (and wanted (cl-every (lambda (tg) (member tg tags)) wanted)))
       (let ((hay (downcase (concat (denote-grid-item-title item) " "
                                     (mapconcat #'identity (denote-grid-item-tags item) " ") " "
-                                    (denote-grid-item-snippet item)))))
+                                    (denote-grid--get-snippet item)))))
         (or (condition-case nil (string-match-p filter hay) (error nil))
             (string-match-p (regexp-quote (downcase filter)) hay))))))
 
