@@ -3,47 +3,14 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.0
-
-;;; Commentary:
-
-;; denote-grid.el turns a denote directory (or, more usefully, whatever
-;; files are currently visible in a `dired'/`denote-dired' buffer) into
-;; a wrapped thumbnail grid, are.na-moodboard style in emacs.
-;;
-;;   - image files    -> native Emacs image scaling (no deps)
-;;   - notes (md/org/txt) -> a small SVG "card" synthesized on the fly
-;;                            from the title/snippet/tags (no deps,
-;;                            uses `svg.el', built into Emacs 27+)
-;;   - video files    -> a frame grabbed with ffmpeg, if found
-;;   - pdf files      -> first page rendered with pdftoppm, if found
-;;                       (falls back to a placeholder card otherwise)
-;;
-;; Setup:
-;;   (add-to-list 'load-path "/path/to/this/folder")
-;;   (require 'denote-grid)
-;;
-;; Usage:
-;;   M-x denote-grid-open        ; grid of a whole denote directory
-;;   M-x denote-grid-from-dired  ; grid of whatever's visible in current dired
-;;
-;; In the grid buffer:
-;;   RET / mouse-1   open file in Emacs
-;;   d               jump to this file in dired
-;;   /               filter (plain substring, or "#tag" / "#tag1 tag2")
-;;   s               cycle sort key (date / title / tags / type)
-;;   r               reverse sort order
-;;   c               toggle cluster mode (group linked notes together)
-;;   g               refresh (rescan files, keep filter/sort)
-;;   q               quit
+;; Version: 0.1.1
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'svg)
 (require 'dired)
-
-;;;; User options
+(require 'color)
 
 (defgroup denote-grid nil
   "An are.na-style local grid for denote notes, images, pdfs, and videos."
@@ -99,13 +66,9 @@
   '((t :inherit shadow))
   "Face for tags in the header line.")
 
-;;;; Internals
-
-(defvar denote-grid--cache-dir nil
-  "Resolved per-directory thumbnail cache dir.")
+(defvar denote-grid--cache-dir nil)
 
 (defun denote-grid--cache-dir-for (root)
-  "Cache directory for thumbnails of denote directory ROOT."
   (let ((dir (expand-file-name ".denote-grid-thumbs/" root)))
     (unless (file-directory-p dir) (make-directory dir t))
     dir))
@@ -119,7 +82,6 @@
   id title tags path type mtime snippet-fetched snippet)
 
 (defun denote-grid--file-type (ext)
-  "Classify file extension EXT into a symbol."
   (cond
    ((member ext denote-grid-image-extensions) 'image)
    ((member ext denote-grid-video-extensions) 'video)
@@ -128,7 +90,6 @@
    (t 'other)))
 
 (defun denote-grid--snippet (path)
-  "Return a short snippet of text file PATH."
   (condition-case nil
       (with-temp-buffer
         (insert-file-contents path nil 0 4000)
@@ -145,7 +106,6 @@
     (error "")))
 
 (defun denote-grid--get-snippet (item)
-  "Lazy-fetch snippet text for note ITEM only when required."
   (unless (denote-grid-item-snippet-fetched item)
     (setf (denote-grid-item-snippet item)
           (if (eq (denote-grid-item-type item) 'text)
@@ -155,7 +115,6 @@
   (denote-grid-item-snippet item))
 
 (defun denote-grid--parse-file (path)
-  "Parse PATH into a `denote-grid-item'."
   (let* ((name (file-name-nondirectory path))
          (ext (downcase (or (file-name-extension name) "")))
          (stem (file-name-sans-extension name)))
@@ -169,10 +128,7 @@
          :id id :title title :tags tags :path path :type type :mtime mtime
          :snippet-fetched nil :snippet "")))))
 
-;;;; Collecting files
-
 (defun denote-grid--collect-items (root)
-  "Recursively collect denote items under ROOT."
   (let (items)
     (dolist (f (directory-files-recursively root ".*" nil
                                              (lambda (d) (not (string-prefix-p "." (file-name-nondirectory d))))))
@@ -182,7 +138,6 @@
     (nreverse items)))
 
 (defun denote-grid--dired-visible-files ()
-  "Return files currently visible in this dired buffer."
   (unless (derived-mode-p 'dired-mode)
     (user-error "denote-grid: not in a dired buffer"))
   (let (files)
@@ -196,13 +151,9 @@
     (nreverse files)))
 
 (defun denote-grid--collect-items-from-dired ()
-  "Collect denote items from files visible in the current dired buffer."
   (delq nil (mapcar #'denote-grid--parse-file (denote-grid--dired-visible-files))))
 
-;;;; Link graph / clustering
-
 (defun denote-grid--links (items)
-  "Return hash table mapping item id -> list of linked item ids."
   (let ((ids (make-hash-table :test 'equal))
         (links (make-hash-table :test 'equal)))
     (dolist (it items) (puthash (denote-grid-item-id it) t ids))
@@ -225,7 +176,6 @@
     links))
 
 (defun denote-grid--clusters (items)
-  "Return hash table mapping item id -> cluster number."
   (let ((links (denote-grid--links items))
         (cluster-of (make-hash-table :test 'equal))
         (n 0))
@@ -241,18 +191,27 @@
                   (dolist (nb (gethash cur links)) (push nb queue)))))))))
     cluster-of))
 
-;;;; Thumbnails
+(defun denote-grid--tag-counts (items)
+  (let ((counts (make-hash-table :test 'equal)))
+    (dolist (it items)
+      (dolist (tag (denote-grid-item-tags it))
+        (puthash tag (1+ (gethash tag counts 0)) counts)))
+    counts))
 
-(defvar denote-grid--palette
-  '("#5b6ee1" "#e15b8f" "#5be1a8" "#e1c25b" "#a05be1" "#e17e5b" "#5bc4e1" "#8fe15b"))
-
-(defun denote-grid--color-for (str)
-  "Pick palette color from STR."
-  (nth (mod (abs (sxhash-equal (or str ""))) (length denote-grid--palette))
-       denote-grid--palette))
+(defun denote-grid--color-for (tags counts)
+  (when-let ((tag (car-safe tags)))
+    (when (>= (gethash tag counts 0) 2)
+      (let* ((hash (secure-hash 'sha256 tag))
+             (h1 (string-to-number (substring hash 0 4) 16))
+             (h2 (string-to-number (substring hash 4 6) 16))
+             (h3 (string-to-number (substring hash 6 8) 16))
+             (hue (/ (mod (* h1 2654435761) 65536) 65536.0))
+             (sat (+ 0.45 (* (/ h2 255.0) 0.50)))
+             (lum (+ 0.40 (* (/ h3 255.0) 0.30)))
+             (rgb (color-hsl-to-rgb hue sat lum)))
+        (apply #'color-rgb-to-hex (append rgb '(2)))))))
 
 (defun denote-grid--wrap-text (str width)
-  "Word-wrap STR to WIDTH characters per line."
   (let ((words (split-string str))
         (lines nil) (cur ""))
     (dolist (w words)
@@ -264,16 +223,16 @@
     (when (> (length cur) 0) (push cur lines))
     (nreverse lines)))
 
-(defun denote-grid--note-svg (item)
-  "Build an SVG card image for note ITEM using current theme faces."
+(defun denote-grid--note-svg (item counts)
   (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
          (bg (face-background 'default nil t))
          (fg (face-foreground 'default nil t))
          (muted (face-foreground 'shadow nil t))
-         (color (denote-grid--color-for (or (car (denote-grid-item-tags item)) (denote-grid-item-title item))))
+         (color (denote-grid--color-for (denote-grid-item-tags item) counts))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
     (svg-rectangle svg 0 0 w h :fill bg :rx 10)
-    (svg-rectangle svg 0 0 6 h :fill color :rx 3)
+    (when color
+      (svg-rectangle svg 0 0 6 h :fill color :rx 3))
     (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 24 nil nil "…")
               :x 16 :y 26 :fill fg :font-size 15 :font-weight "bold" :font-family "sans-serif")
     (let ((y 48))
@@ -281,34 +240,35 @@
         (when (< y (- h 22))
           (svg-text svg line :x 16 :y y :fill muted :font-size 11 :font-family "sans-serif")
           (setq y (+ y 15)))))
-    (let ((tagstr (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags item) "  ")))
-      (svg-text svg (truncate-string-to-width tagstr 36 nil nil "…")
-                :x 16 :y (- h 12) :fill color :font-size 10 :font-family "sans-serif"))
+    (when color
+      (let ((tagstr (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags item) "  ")))
+        (svg-text svg (truncate-string-to-width tagstr 36 nil nil "…")
+                  :x 16 :y (- h 12) :fill color :font-size 10 :font-family "sans-serif")))
     (svg-image svg :ascent 'center)))
 
-(defun denote-grid--placeholder-svg (item label)
-  "Generic placeholder card for ITEM with LABEL using current theme faces."
+(defun denote-grid--placeholder-svg (item label counts)
   (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
          (bg (face-background 'default nil t))
          (fg (face-foreground 'default nil t))
-         (color (denote-grid--color-for (denote-grid-item-title item)))
+         (color (denote-grid--color-for (denote-grid-item-tags item) counts))
+         (accent (or color (face-foreground 'shadow nil t)))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
     (svg-rectangle svg 0 0 w h :fill bg :rx 10)
-    (svg-rectangle svg 0 0 w h :fill color :fill-opacity "0.12" :rx 10)
-    (svg-text svg label :x (/ w 2) :y (/ h 2) :fill color :font-size 22
+    (svg-rectangle svg 0 0 w h :fill accent :fill-opacity "0.12" :rx 10)
+    (when color
+      (svg-rectangle svg 0 0 6 h :fill color :rx 3))
+    (svg-text svg label :x (/ w 2) :y (/ h 2) :fill accent :font-size 22
               :font-weight "bold" :font-family "sans-serif" :text-anchor "middle")
     (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 26 nil nil "…")
               :x 14 :y (- h 14) :fill fg :font-size 11 :font-family "sans-serif")
     (svg-image svg :ascent 'center)))
 
 (defun denote-grid--cache-file (item ext)
-  "Path in thumbnail cache for ITEM."
   (expand-file-name (format "%s-%d.%s" (denote-grid-item-id item)
                              (round (denote-grid-item-mtime item)) ext)
                      denote-grid--cache-dir))
 
 (defun denote-grid--mime-for (file)
-  "Guess MIME type for FILE."
   (pcase (downcase (or (file-name-extension file) ""))
     ((or "jpg" "jpeg") "image/jpeg")
     ("png" "image/png")
@@ -318,14 +278,13 @@
     ("bmp" "image/bmp")
     (_ "image/png")))
 
-(defun denote-grid--boxed-raster (item raw-file label)
-  "Composite RAW-FILE into a card of `denote-grid-thumbnail-size'."
+(defun denote-grid--boxed-raster (item raw-file label counts)
   (if (null raw-file)
-      (denote-grid--placeholder-svg item label)
+      (denote-grid--placeholder-svg item label counts)
     (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
            (dim (ignore-errors (image-size (create-image raw-file nil nil) t))))
       (if (not dim)
-          (denote-grid--placeholder-svg item label)
+          (denote-grid--placeholder-svg item label counts)
         (let* ((iw (car dim)) (ih (cdr dim))
                (pad 6)
                (scale (min (/ (float (- w (* 2 pad))) iw) (/ (float (- h (* 2 pad))) ih)))
@@ -333,6 +292,7 @@
                (dh (max 1 (round (* ih scale))))
                (x (round (/ (- w dw) 2.0)))
                (y (round (/ (- h dh) 2.0)))
+               (color (denote-grid--color-for (denote-grid-item-tags item) counts))
                (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink"))
                (bg (face-background 'default nil t)))
           (svg-rectangle svg 0 0 w h :fill bg :rx 10)
@@ -340,14 +300,14 @@
               (progn
                 (svg-embed svg raw-file (denote-grid--mime-for raw-file) nil
                            :x x :y y :width dw :height dh)
+                (when color
+                  (svg-rectangle svg 0 0 6 h :fill color :rx 3))
                 (svg-image svg :ascent 'center))
-            (error (denote-grid--placeholder-svg item label))))))))
+            (error (denote-grid--placeholder-svg item label counts))))))))
 
-(defvar denote-grid--image-cache (make-hash-table :test 'equal)
-  "Cache of composited card images.")
+(defvar denote-grid--image-cache (make-hash-table :test 'equal))
 
-(defun denote-grid--video-thumb (item)
-  "Return video thumbnail via ffmpeg."
+(defun denote-grid--video-thumb (item counts)
   (let ((out nil))
     (when (executable-find denote-grid-ffmpeg-executable)
       (setq out (denote-grid--cache-file item "jpg"))
@@ -358,10 +318,9 @@
                        "-vf" (format "scale=%d:-1" (* 2 denote-grid-thumbnail-size))
                        "-loglevel" "quiet" out))
       (unless (file-exists-p out) (setq out nil)))
-    (denote-grid--boxed-raster item out "VIDEO")))
+    (denote-grid--boxed-raster item out "VIDEO" counts)))
 
-(defun denote-grid--pdf-thumb (item)
-  "Return PDF thumbnail via pdftoppm."
+(defun denote-grid--pdf-thumb (item counts)
   (let ((out nil))
     (when (executable-find denote-grid-pdftoppm-executable)
       (let* ((base (denote-grid--cache-file item "pdfpage"))
@@ -372,41 +331,39 @@
                          "-scale-to" (number-to-string (* 2 denote-grid-thumbnail-size))
                          (denote-grid-item-path item) base))
         (when (file-exists-p png) (setq out png))))
-    (denote-grid--boxed-raster item out "PDF")))
+    (denote-grid--boxed-raster item out "PDF" counts)))
 
-(defun denote-grid--image-thumb (item)
-  "Return thumbnail for image ITEM."
-  (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG"))
+(defun denote-grid--image-thumb (item counts)
+  (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts))
 
-(defun denote-grid--get-image (item)
-  "Return cached display image for ITEM."
-  (let* ((key (list (denote-grid-item-id item) (denote-grid-item-mtime item)
-                     (denote-grid-item-type item) denote-grid-thumbnail-size
-                     (face-background 'default nil t)))
+(defun denote-grid--get-image (item counts)
+  (let* ((tag-color (denote-grid--color-for (denote-grid-item-tags item) counts))
+         (key (list (denote-grid-item-id item) (denote-grid-item-mtime item)
+                    (denote-grid-item-type item) denote-grid-thumbnail-size
+                    (face-background 'default nil t) tag-color))
          (cached (gethash key denote-grid--image-cache)))
     (or cached
         (puthash key
                  (pcase (denote-grid-item-type item)
-                   ('image (denote-grid--image-thumb item))
-                   ('video (denote-grid--video-thumb item))
-                   ('pdf (denote-grid--pdf-thumb item))
-                   ('text (denote-grid--note-svg item))
-                   (_ (denote-grid--placeholder-svg item "FILE")))
+                   ('image (denote-grid--image-thumb item counts))
+                   ('video (denote-grid--video-thumb item counts))
+                   ('pdf (denote-grid--pdf-thumb item counts))
+                   ('text (denote-grid--note-svg item counts))
+                   (_ (let ((ext-label (upcase (or (file-name-extension (denote-grid-item-path item)) "FILE"))))
+                        (denote-grid--placeholder-svg item ext-label counts))))
                  denote-grid--image-cache))))
 
-;;;; Buffer / mode
-
-(defvar-local denote-grid--items nil "All items in this grid buffer, unfiltered.")
-(defvar-local denote-grid--filter "" "Current filter string.")
-(defvar-local denote-grid--sort-key 'date "Current sort key: date/title/tags/type.")
-(defvar-local denote-grid--sort-desc t "Whether sort is descending.")
-(defvar-local denote-grid--cluster-p nil "Whether cluster grouping is on.")
-(defvar-local denote-grid--current-item nil "Item under point, for header-line.")
-(defvar-local denote-grid--card-starts nil "Ordered vector/list of buffer positions where each card starts.")
-(defvar-local denote-grid--source-directory nil "Directory this grid was opened from.")
-(defvar-local denote-grid--source-dired-buffer nil "Dired buffer this grid was opened from.")
-(defvar-local denote-grid--selection-overlay nil "Overlay for highlighting selected card.")
-(defvar-local denote-grid--last-win-width nil "Last recorded window pixel width.")
+(defvar-local denote-grid--items nil)
+(defvar-local denote-grid--filter "")
+(defvar-local denote-grid--sort-key 'date)
+(defvar-local denote-grid--sort-desc t)
+(defvar-local denote-grid--cluster-p nil)
+(defvar-local denote-grid--current-item nil)
+(defvar-local denote-grid--card-starts nil)
+(defvar-local denote-grid--source-directory nil)
+(defvar-local denote-grid--source-dired-buffer nil)
+(defvar-local denote-grid--selection-overlay nil)
+(defvar-local denote-grid--last-win-width nil)
 
 (defvar denote-grid-mode-map
   (let ((m (make-sparse-keymap)))
@@ -451,7 +408,6 @@
             (if denote-grid--cluster-p "  [clustered]" ""))))
 
 (defun denote-grid--update-point-info ()
-  "Fast update for cursor overlay and header status."
   (setq denote-grid--current-item (get-text-property (point) 'denote-grid-item))
   (when (and (derived-mode-p 'denote-grid-mode) denote-grid--card-starts)
     (unless (overlayp denote-grid--selection-overlay)
@@ -465,15 +421,12 @@
   (force-mode-line-update))
 
 (defun denote-grid--on-window-size-change (win)
-  "Reflow buffer content when window width changes."
   (when (and (eq (window-buffer win) (current-buffer))
              (derived-mode-p 'denote-grid-mode))
     (let ((w (window-pixel-width win)))
       (unless (equal w denote-grid--last-win-width)
         (setq denote-grid--last-win-width w)
         (denote-grid--render)))))
-
-;;;; Filtering / sorting
 
 (defun denote-grid--matches-p (item filter)
   (if (string-empty-p filter)
@@ -496,7 +449,6 @@
     ('type (symbol-name (denote-grid-item-type item)))))
 
 (defun denote-grid--visible-items ()
-  "Filtered and sorted items for the current buffer state."
   (let* ((filtered (cl-remove-if-not (lambda (it) (denote-grid--matches-p it denote-grid--filter))
                                       denote-grid--items))
          (sorted (sort (copy-sequence filtered)
@@ -515,16 +467,15 @@
                       (< ca cb))))))
       sorted)))
 
-;;;; Rendering
-
 (defun denote-grid--render ()
   (let ((inhibit-read-only t)
         (pos (point))
         (clusters (and denote-grid--cluster-p (denote-grid--clusters denote-grid--items)))
         (starts nil))
     (erase-buffer)
-    (let ((items (denote-grid--visible-items))
-          (last-cluster nil))
+    (let* ((items (denote-grid--visible-items))
+           (counts (denote-grid--tag-counts items))
+           (last-cluster nil))
       (if (null items)
           (insert (propertize "\n  (no items match)\n" 'face 'shadow))
         (dolist (it items)
@@ -534,7 +485,7 @@
                 (unless (null last-cluster) (insert "\n\n"))
                 (insert (propertize (format "  ·· cluster %d ··\n" c) 'face 'shadow))
                 (setq last-cluster c))))
-          (let ((img (denote-grid--get-image it))
+          (let ((img (denote-grid--get-image it counts))
                 (start (point)))
             (push start starts)
             (insert-image img (denote-grid-item-title it))
@@ -548,10 +499,7 @@
     (setq denote-grid--card-starts (vconcat (nreverse starts)))
     (goto-char (min pos (point-max)))))
 
-;;;; Optimized Navigation
-
 (defun denote-grid--card-index-at (pos)
-  "Binary search to instantly find card index at POS."
   (let ((vec denote-grid--card-starts)
         (low 0)
         (high (1- (length denote-grid--card-starts)))
@@ -566,13 +514,11 @@
     ans))
 
 (defun denote-grid--calculate-columns ()
-  "Determine current visible grid columns mathematically based on window width."
   (let* ((win-w (window-pixel-width))
          (card-w (+ denote-grid-thumbnail-size 20)))
     (max 1 (/ win-w card-w))))
 
 (defun denote-grid-next-card (&optional n)
-  "Move point to next card."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cur (denote-grid--card-index-at (point)))
@@ -580,7 +526,6 @@
       (goto-char (aref denote-grid--card-starts target)))))
 
 (defun denote-grid-prev-card (&optional n)
-  "Move point to previous card."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cur (denote-grid--card-index-at (point)))
@@ -588,7 +533,6 @@
       (goto-char (aref denote-grid--card-starts target)))))
 
 (defun denote-grid-down-card (&optional n)
-  "Move point to the card directly below using column offset arithmetic."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cols (denote-grid--calculate-columns))
@@ -597,7 +541,6 @@
       (goto-char (aref denote-grid--card-starts target)))))
 
 (defun denote-grid-up-card (&optional n)
-  "Move point to the card directly above using column offset arithmetic."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cols (denote-grid--calculate-columns))
@@ -606,27 +549,23 @@
       (goto-char (aref denote-grid--card-starts target)))))
 
 (defun denote-grid-open-at-point ()
-  "Open denote file under point directly inside Emacs."
   (interactive)
   (if-let ((it (get-text-property (point) 'denote-grid-item)))
       (find-file (denote-grid-item-path it))
     (user-error "No item at point")))
 
 (defun denote-grid-jump-to-dired ()
-  "Jump to file under point in dired."
   (interactive)
   (if-let ((it (get-text-property (point) 'denote-grid-item)))
       (dired-jump nil (denote-grid-item-path it))
     (user-error "No item at point")))
 
 (defun denote-grid-filter (filter)
-  "Filter grid by FILTER string."
   (interactive (list (read-string "Filter (#tag or text): " denote-grid--filter)))
   (setq denote-grid--filter filter)
   (denote-grid--render))
 
 (defun denote-grid-sort-cycle ()
-  "Cycle sort key."
   (interactive)
   (setq denote-grid--sort-key
         (pcase denote-grid--sort-key
@@ -634,20 +573,18 @@
   (denote-grid--render))
 
 (defun denote-grid-sort-reverse ()
-  "Reverse sort order."
   (interactive)
   (setq denote-grid--sort-desc (not denote-grid--sort-desc))
   (denote-grid--render))
 
 (defun denote-grid-toggle-cluster ()
-  "Toggle grouping of linked notes."
   (interactive)
   (setq denote-grid--cluster-p (not denote-grid--cluster-p))
   (denote-grid--render))
 
 (defun denote-grid-refresh ()
-  "Rescan files and re-render grid."
   (interactive)
+  (clrhash denote-grid--image-cache)
   (cond
    (denote-grid--source-dired-buffer
     (if (buffer-live-p denote-grid--source-dired-buffer)
@@ -661,7 +598,6 @@
 
 ;;;###autoload
 (defun denote-grid-open (&optional dir)
-  "Open a grid of the denote directory DIR."
   (interactive)
   (let* ((root (expand-file-name
                 (or dir denote-grid-directory
@@ -678,7 +614,6 @@
 
 ;;;###autoload
 (defun denote-grid-from-dired ()
-  "Open a grid of the visible files in dired."
   (interactive)
   (let* ((src (current-buffer))
          (root (expand-file-name default-directory))
