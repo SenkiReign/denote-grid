@@ -3,7 +3,8 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.1
+;; Version: 0.1.3
+
 
 ;;; Code:
 
@@ -30,6 +31,12 @@
 (defcustom denote-grid-note-snippet-length 220
   "How many characters of a note's body to show on its card."
   :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-ripgrep-executable "rg"
+  "Path to ripgrep executable used for fast full-text search.
+If nil or not found on PATH, `denote-grid' falls back to internal Elisp search."
+  :type '(choice (const :tag "Disable ripgrep" nil) string)
   :group 'denote-grid)
 
 (defcustom denote-grid-ffmpeg-executable "ffmpeg"
@@ -98,6 +105,7 @@
           (while (not (eobp))
             (let ((line (buffer-substring-no-properties
                          (line-beginning-position) (line-end-position))))
+              ;; Skip metadata blocks (#+TITLE, #+DATE, --- yaml ---)
               (unless (string-match-p "\\`\\(#\\+\\|---\\)" line)
                 (push line lines)))
             (forward-line 1))
@@ -152,6 +160,23 @@
 
 (defun denote-grid--collect-items-from-dired ()
   (delq nil (mapcar #'denote-grid--parse-file (denote-grid--dired-visible-files))))
+
+(defun denote-grid--file-contains-p (path query)
+  "Check if PATH contains QUERY (case-insensitive).
+Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
+  (let ((rg (and denote-grid-ripgrep-executable
+                 (executable-find denote-grid-ripgrep-executable))))
+    (if rg
+        ;; Fast path: ripgrep returns exit code 0 on match, 1 on no match
+        (zerop (call-process rg nil nil nil "-q" "-i" "-F" query path))
+      ;; Fallback path: pure Elisp buffer search
+      (condition-case nil
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (let ((case-fold-search t))
+              (search-forward query nil t)))
+        (error nil)))))
 
 (defun denote-grid--links (items)
   (let ((ids (make-hash-table :test 'equal))
@@ -436,10 +461,10 @@
               (tags (mapcar #'downcase (denote-grid-item-tags item))))
           (and wanted (cl-every (lambda (tg) (member tg tags)) wanted)))
       (let ((hay (downcase (concat (denote-grid-item-title item) " "
-                                    (mapconcat #'identity (denote-grid-item-tags item) " ") " "
-                                    (denote-grid--get-snippet item)))))
-        (or (condition-case nil (string-match-p filter hay) (error nil))
-            (string-match-p (regexp-quote (downcase filter)) hay))))))
+                                    (mapconcat #'identity (denote-grid-item-tags item) " ")))))
+        (or (string-match-p (regexp-quote (downcase filter)) hay)
+            (and (eq (denote-grid-item-type item) 'text)
+                 (denote-grid--file-contains-p (denote-grid-item-path item) filter)))))))
 
 (defun denote-grid--sort-value (item key)
   (pcase key
