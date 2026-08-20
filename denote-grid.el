@@ -5,6 +5,9 @@
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
 ;; Version: 0.2.0
 
+;;; Commentary:
+;; Grid view for denote in emacs
+
 ;;; Code:
 
 (require 'cl-lib)
