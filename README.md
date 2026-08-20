@@ -41,9 +41,10 @@ When in the `*denote-grid*` buffer:
 | :--- | :--- |
 | `RET` / `mouse-1` | Open file directly in Emacs |
 | `d` | Jump to file location in Dired |
+| `c` | Toggle cluster mode (groups linked notes together) |
+| `o` | Toggle orphan mode shows notes that has no connections) |
 | `/` | Filter items (supports plain text substring, `#tag`, or `#tag1 tag2`) |
 | `s` | Cycle sort key (`date` → `title` → `tags` → `type`) |
 | `r` | Reverse sort order |
-| `c` | Toggle cluster mode (groups linked notes together) |
 | `g` | Refresh (rescans files while maintaining current filter and sort) |
 | `q` | Quit window |
