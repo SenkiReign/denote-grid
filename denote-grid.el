@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.3
+;; Version: 0.1.4
 
 
 ;;; Code:
@@ -330,7 +330,7 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
                 (svg-image svg :ascent 'center))
             (error (denote-grid--placeholder-svg item label counts))))))))
 
-(defvar denote-grid--image-cache (make-hash-table :test 'equal))
+(defvar-local denote-grid--image-cache nil)
 
 (defun denote-grid--video-thumb (item counts)
   (let ((out nil))
@@ -362,6 +362,8 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
   (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts))
 
 (defun denote-grid--get-image (item counts)
+  (unless denote-grid--image-cache
+    (setq denote-grid--image-cache (make-hash-table :test 'equal)))
   (let* ((tag-color (denote-grid--color-for (denote-grid-item-tags item) counts))
          (key (list (denote-grid-item-id item) (denote-grid-item-mtime item)
                     (denote-grid-item-type item) denote-grid-thumbnail-size
@@ -378,6 +380,20 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
                         (denote-grid--placeholder-svg item ext-label counts))))
                  denote-grid--image-cache))))
 
+(defun denote-grid--prune-image-cache (items)
+  "Drop cache entries for ITEM ids no longer present.
+Keeps memory bounded to the current buffer's item set instead of
+growing forever across refreshes, mtime bumps, and theme switches."
+  (when (hash-table-p denote-grid--image-cache)
+    (let ((live-ids (make-hash-table :test 'equal)))
+      (dolist (it items) (puthash (denote-grid-item-id it) t live-ids))
+      (let (stale)
+        (maphash (lambda (key _val)
+                   (unless (gethash (car key) live-ids)
+                     (push key stale)))
+                 denote-grid--image-cache)
+        (dolist (key stale) (remhash key denote-grid--image-cache))))))
+
 (defvar-local denote-grid--items nil)
 (defvar-local denote-grid--filter "")
 (defvar-local denote-grid--sort-key 'date)
@@ -389,6 +405,8 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
 (defvar-local denote-grid--source-dired-buffer nil)
 (defvar-local denote-grid--selection-overlay nil)
 (defvar-local denote-grid--last-win-width nil)
+(defvar-local denote-grid--clusters-cache nil)
+(defvar-local denote-grid--clusters-cache-key nil)
 
 (defvar denote-grid-mode-map
   (let ((m (make-sparse-keymap)))
@@ -416,7 +434,15 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
   (setq truncate-lines nil)
   (setq header-line-format '(:eval (denote-grid--header-line)))
   (add-hook 'post-command-hook #'denote-grid--update-point-info nil t)
-  (add-hook 'window-size-change-functions #'denote-grid--on-window-size-change nil t))
+  (add-hook 'window-size-change-functions #'denote-grid--on-window-size-change nil t)
+  (add-hook 'kill-buffer-hook #'denote-grid--cleanup nil t))
+
+(defun denote-grid--cleanup ()
+  "Release this buffer's cached thumbnails when the grid is killed."
+  (when (hash-table-p denote-grid--image-cache)
+    (clrhash denote-grid--image-cache))
+  (setq denote-grid--image-cache nil
+        denote-grid--clusters-cache nil))
 
 (defun denote-grid--header-line ()
   (if denote-grid--current-item
@@ -473,6 +499,14 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
     ('tags (or (car (denote-grid-item-tags item)) ""))
     ('type (symbol-name (denote-grid-item-type item)))))
 
+(defun denote-grid--clusters-cached (items)
+  "Recompute clusters only when ITEMS actually changed."
+  (let ((key (mapcar (lambda (it) (denote-grid-item-id it)) items)))
+    (unless (equal key denote-grid--clusters-cache-key)
+      (setq denote-grid--clusters-cache (denote-grid--clusters items)
+            denote-grid--clusters-cache-key key))
+    denote-grid--clusters-cache))
+
 (defun denote-grid--visible-items ()
   (let* ((filtered (cl-remove-if-not (lambda (it) (denote-grid--matches-p it denote-grid--filter))
                                       denote-grid--items))
@@ -482,7 +516,7 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
                                 (vb (denote-grid--sort-value b denote-grid--sort-key)))
                             (if denote-grid--sort-desc (string> va vb) (string< va vb)))))))
     (if denote-grid--cluster-p
-        (let ((clusters (denote-grid--clusters sorted)))
+        (let ((clusters (denote-grid--clusters-cached sorted)))
           (sort (copy-sequence sorted)
                 (lambda (a b)
                   (let ((ca (gethash (denote-grid-item-id a) clusters))
@@ -495,7 +529,7 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
 (defun denote-grid--render ()
   (let ((inhibit-read-only t)
         (pos (point))
-        (clusters (and denote-grid--cluster-p (denote-grid--clusters denote-grid--items)))
+        (clusters (and denote-grid--cluster-p (denote-grid--clusters-cached denote-grid--items)))
         (starts nil))
     (erase-buffer)
     (let* ((items (denote-grid--visible-items))
@@ -609,7 +643,6 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
 
 (defun denote-grid-refresh ()
   (interactive)
-  (clrhash denote-grid--image-cache)
   (cond
    (denote-grid--source-dired-buffer
     (if (buffer-live-p denote-grid--source-dired-buffer)
@@ -619,6 +652,11 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
       (message "denote-grid: source dired buffer is gone, keeping last known items")))
    (denote-grid--source-directory
     (setq denote-grid--items (denote-grid--collect-items denote-grid--source-directory))))
+  ;; Prune only entries for items that no longer exist, instead of wiping
+  ;; the whole cache (which would force re-rendering every visible card).
+  (denote-grid--prune-image-cache denote-grid--items)
+  (setq denote-grid--clusters-cache nil
+        denote-grid--clusters-cache-key nil)
   (denote-grid--render))
 
 ;;;###autoload
