@@ -1,9 +1,9 @@
-;;; denote-grid.el --- An are.na-style grid for denote -*- lexical-binding: t; -*-
+;;; denote-grid.el --- Grid view for denote -*- lexical-binding: t; -*-
 
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
-;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.9
+;; Package-Requires: ((emacs "27.1") (denote "1.0"))
+;; Version: 0.2.0
 
 ;;; Code:
 
@@ -11,16 +11,12 @@
 (require 'svg)
 (require 'dired)
 (require 'color)
+(require 'denote)
 
 (defgroup denote-grid nil
   "An are.na-style local grid for denote notes, images, pdfs, and videos."
   :group 'convenience
   :prefix "denote-grid-")
-
-(defcustom denote-grid-directory nil
-  "Directory of denote files to browse as a grid."
-  :type '(choice (const :tag "Use denote-directory / ask" nil) directory)
-  :group 'denote-grid)
 
 (defcustom denote-grid-thumbnail-size 220
   "Max width/height in pixels for grid thumbnails."
@@ -146,7 +142,7 @@
 (defun denote-grid--collect-items (root)
   (let (items)
     (dolist (f (directory-files-recursively root ".*" nil
-                                             (lambda (d) (not (string-prefix-p "." (file-name-nondirectory d))))))
+                                           (lambda (d) (not (string-prefix-p "." (file-name-nondirectory d))))))
       (unless (string-prefix-p "." (file-name-nondirectory f))
         (when-let ((item (denote-grid--parse-file f)))
           (push item items))))
@@ -205,19 +201,29 @@
 
 (defun denote-grid--clusters (items)
   (let ((links (denote-grid--links items))
-        (cluster-of (make-hash-table :test 'equal))
-        (n 0))
+        (visited (make-hash-table :test 'equal))
+        (components nil))
     (dolist (it items)
       (let ((id (denote-grid-item-id it)))
-        (unless (gethash id cluster-of)
-          (setq n (1+ n))
-          (let ((queue (list id)))
+        (unless (gethash id visited)
+          (let ((queue (list id))
+                (component nil))
             (while queue
               (let ((cur (pop queue)))
-                (unless (gethash cur cluster-of)
-                  (puthash cur n cluster-of)
-                  (dolist (nb (gethash cur links)) (push nb queue)))))))))
-    cluster-of))
+                (unless (gethash cur visited)
+                  (puthash cur t visited)
+                  (push cur component)
+                  (dolist (nb (gethash cur links)) (push nb queue)))))
+            (when component
+              (push component components))))))
+    (setq components (sort components (lambda (a b) (> (length a) (length b)))))
+    (let ((cluster-of (make-hash-table :test 'equal))
+          (n 0))
+      (dolist (comp components)
+        (setq n (1+ n))
+        (dolist (id comp)
+          (puthash id n cluster-of)))
+      cluster-of)))
 
 (defun denote-grid--tag-counts (items)
   (let ((counts (make-hash-table :test 'equal)))
@@ -291,8 +297,8 @@
 
 (defun denote-grid--cache-file (item ext)
   (expand-file-name (format "%s-%d.%s" (denote-grid-item-id item)
-                             (round (denote-grid-item-mtime item)) ext)
-                     denote-grid--cache-dir))
+                            (round (denote-grid-item-mtime item)) ext)
+                    denote-grid--cache-dir))
 
 (defun denote-grid--mime-for (file)
   (pcase (downcase (or (file-name-extension file) ""))
@@ -338,11 +344,11 @@
       (setq out (denote-grid--cache-file item "jpg"))
       (unless (file-exists-p out)
         (call-process denote-grid-ffmpeg-executable nil nil nil
-                       "-y" "-ss" "1" "-i" (denote-grid-item-path item)
-                       "-frames:v" "1"
-                       "-vf" (format "scale=%d:-1" (* denote-grid-thumbnail-oversample
-                                                       denote-grid-thumbnail-size))
-                       "-loglevel" "quiet" out))
+                      "-y" "-ss" "1" "-i" (denote-grid-item-path item)
+                      "-frames:v" "1"
+                      "-vf" (format "scale=%d:-1" (* denote-grid-thumbnail-oversample
+                                                     denote-grid-thumbnail-size))
+                      "-loglevel" "quiet" out))
       (unless (file-exists-p out) (setq out nil)))
     (denote-grid--boxed-raster item out "VIDEO" counts)))
 
@@ -353,10 +359,10 @@
              (png (concat base ".png")))
         (unless (file-exists-p png)
           (call-process denote-grid-pdftoppm-executable nil nil nil
-                         "-png" "-f" "1" "-singlefile"
-                         "-scale-to" (number-to-string (* denote-grid-thumbnail-oversample
-                                                           denote-grid-thumbnail-size))
-                         (denote-grid-item-path item) base))
+                        "-png" "-f" "1" "-singlefile"
+                        "-scale-to" (number-to-string (* denote-grid-thumbnail-oversample
+                                                          denote-grid-thumbnail-size))
+                        (denote-grid-item-path item) base))
         (when (file-exists-p png) (setq out png))))
     (denote-grid--boxed-raster item out "PDF" counts)))
 
@@ -395,6 +401,7 @@
 (defvar-local denote-grid--sort-key 'date)
 (defvar-local denote-grid--sort-desc t)
 (defvar-local denote-grid--cluster-p nil)
+(defvar-local denote-grid--orphan-p nil)
 (defvar-local denote-grid--current-item nil)
 (defvar-local denote-grid--card-starts nil)
 (defvar-local denote-grid--source-directory nil)
@@ -415,6 +422,7 @@
     (define-key m (kbd "s") #'denote-grid-sort-cycle)
     (define-key m (kbd "r") #'denote-grid-sort-reverse)
     (define-key m (kbd "c") #'denote-grid-toggle-cluster)
+    (define-key m (kbd "o") #'denote-grid-toggle-orphan)
     (define-key m (kbd "g") #'denote-grid-refresh)
     (define-key m (kbd "q") #'quit-window)
     (define-key m (kbd "<right>") #'denote-grid-next-card)
@@ -454,11 +462,12 @@
                 (propertize (substring (denote-grid-item-id it) 0 8) 'face 'shadow)
                 (propertize (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")
                             'face 'denote-grid-tag-face)))
-    (format " %d items  sort:%s%s  filter:%s%s"
+    (format " %d items  sort:%s%s  filter:%s%s%s"
             (length denote-grid--items) denote-grid--sort-key
             (if denote-grid--sort-desc "↓" "↑")
             (if (string-empty-p denote-grid--filter) "(none)" denote-grid--filter)
-            (if denote-grid--cluster-p "  [clustered]" ""))))
+            (if denote-grid--cluster-p "  [clustered]" "")
+            (if denote-grid--orphan-p "  [orphans]" ""))))
 
 (defun denote-grid--update-point-info ()
   (setq denote-grid--current-item (get-text-property (point) 'denote-grid-item))
@@ -479,7 +488,6 @@
             (win-width (window-body-width win t))
             (space-width (frame-char-width))
             (card-width (+ denote-grid-thumbnail-size (* space-width 2))))
-      ;; Clamp between 1 minimum and 5 maximum cards per row
       (min 5 (max 1 (floor win-width card-width)))
     1))
 
@@ -499,7 +507,7 @@
               (tags (mapcar #'downcase (denote-grid-item-tags item))))
           (and wanted (cl-every (lambda (tg) (member tg tags)) wanted)))
       (let ((hay (downcase (concat (denote-grid-item-title item) " "
-                                    (mapconcat #'identity (denote-grid-item-tags item) " ")))))
+                                   (mapconcat #'identity (denote-grid-item-tags item) " ")))))
         (or (string-match-p (regexp-quote (downcase filter)) hay)
             (and (eq (denote-grid-item-type item) 'text)
                  (denote-grid--file-contains-p (denote-grid-item-path item) filter)))))))
@@ -520,28 +528,32 @@
 
 (defun denote-grid--visible-items ()
   (let* ((filtered (cl-remove-if-not (lambda (it) (denote-grid--matches-p it denote-grid--filter))
-                                      denote-grid--items))
+                                     denote-grid--items))
          (sorted (sort (copy-sequence filtered)
-                        (lambda (a b)
-                          (let ((va (denote-grid--sort-value a denote-grid--sort-key))
-                                (vb (denote-grid--sort-value b denote-grid--sort-key)))
-                            (if denote-grid--sort-desc (string> va vb) (string< va vb)))))))
-    (if denote-grid--cluster-p
-        (let* ((clusters (denote-grid--clusters-cached sorted))
-               (links (denote-grid--links sorted))
-               ;; Keep only items that have at least one link in `links`
-               (connected (cl-remove-if-not
-                           (lambda (it)
-                             (> (length (gethash (denote-grid-item-id it) links)) 0))
-                           sorted)))
-          (sort (copy-sequence connected)
-                (lambda (a b)
-                  (let ((ca (gethash (denote-grid-item-id a) clusters))
-                        (cb (gethash (denote-grid-item-id b) clusters)))
-                    (if (= ca cb)
-                        (string> (denote-grid-item-id a) (denote-grid-item-id b))
-                      (< ca cb))))))
-      sorted)))
+                       (lambda (a b)
+                         (let ((va (denote-grid--sort-value a denote-grid--sort-key))
+                               (vb (denote-grid--sort-value b denote-grid--sort-key)))
+                           (if denote-grid--sort-desc (string> va vb) (string< va vb))))))
+         (links (denote-grid--links sorted)))
+    (cond
+     (denote-grid--cluster-p
+      (let* ((clusters (denote-grid--clusters-cached sorted))
+             (connected (cl-remove-if-not
+                         (lambda (it) (> (length (gethash (denote-grid-item-id it) links)) 0))
+                         sorted)))
+        (sort (copy-sequence connected)
+              (lambda (a b)
+                (let ((ca (gethash (denote-grid-item-id a) clusters))
+                      (cb (gethash (denote-grid-item-id b) clusters)))
+                  (if (= ca cb)
+                      (string> (denote-grid-item-id a) (denote-grid-item-id b))
+                    (< ca cb)))))))
+
+     (denote-grid--orphan-p
+      (cl-remove-if (lambda (it) (> (length (gethash (denote-grid-item-id it) links)) 0))
+                    sorted))
+
+     (t sorted))))
 
 (defun denote-grid--raster-p (item)
   (memq (denote-grid-item-type item) '(image video pdf)))
@@ -580,7 +592,7 @@
                 (setq last-cluster c)
                 (setq count 0))))
           (let* ((cached (and (hash-table-p denote-grid--image-cache)
-                               (gethash (denote-grid--cache-key it counts) denote-grid--image-cache)))
+                              (gethash (denote-grid--cache-key it counts) denote-grid--image-cache)))
                  (deferred (and (not cached) (denote-grid--raster-p it)))
                  (img (or cached
                           (if deferred
@@ -596,10 +608,10 @@
               (push (list start (point) it counts) pending))
             (put-text-property start (point) 'denote-grid-item it)
             (put-text-property start (point) 'help-echo
-                                (format "%s\n%s\n%s"
-                                        (denote-grid-item-title it)
-                                        (denote-grid-item-id it)
-                                        (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")))
+                               (format "%s\n%s\n%s"
+                                       (denote-grid-item-title it)
+                                       (denote-grid-item-id it)
+                                       (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")))
             (setq count (1+ count))
             (if (= (mod count cols) 0)
                 (insert "\n")
@@ -678,7 +690,90 @@ DIRECTION non-nil means move forward, nil means move backward."
         (when (>= idx 0)
           (goto-char (aref denote-grid--card-starts idx)))))))
 
+;;; Interactive Commands
+
+;;;###autoload
+(defun denote-grid-open (&optional dir)
+  "Open the denote grid view for DIR.
+If DIR is nil, automatically fallback to `denote-directory`."
+  (interactive
+   (list (when current-prefix-arg
+           (read-directory-name "Denote directory: " denote-directory))))
+  (let* ((root (expand-file-name (or dir denote-directory)))
+         (buf-name (format "*denote-grid: %s*" (file-name-nondirectory (directory-file-name root))))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (denote-grid-mode)
+      (setq-local denote-grid--source-directory root)
+      (setq-local denote-grid--cache-dir (denote-grid--cache-dir-for root))
+      (setq-local denote-grid--items (denote-grid--collect-items root))
+      (denote-grid--render))
+    (switch-to-buffer buf)))
+
+(defun denote-grid-open-at-point ()
+  "Open the file corresponding to the card at point."
+  (interactive)
+  (if-let ((item (get-text-property (point) 'denote-grid-item)))
+      (find-file (denote-grid-item-path item))
+    (user-error "No item at point")))
+
+(defun denote-grid-toggle-orphan ()
+  "Toggle orphan view mode in denote-grid."
+  (interactive)
+  (setq denote-grid--orphan-p (not denote-grid--orphan-p))
+  (when denote-grid--orphan-p
+    (setq denote-grid--cluster-p nil))
+  (denote-grid--render))
+
+(defun denote-grid-toggle-cluster ()
+  "Toggle cluster view mode in denote-grid."
+  (interactive)
+  (setq denote-grid--cluster-p (not denote-grid--cluster-p))
+  (when denote-grid--cluster-p
+    (setq denote-grid--orphan-p nil))
+  (denote-grid--render))
+
+(defun denote-grid-filter (query)
+  "Filter items in the grid buffer by QUERY."
+  (interactive (list (read-string "Filter grid (text or #tag): " denote-grid--filter)))
+  (setq denote-grid--filter query)
+  (denote-grid--render))
+
+(defun denote-grid-sort-cycle ()
+  "Cycle through sorting criteria."
+  (interactive)
+  (setq denote-grid--sort-key
+        (pcase denote-grid--sort-key
+          ('date 'title)
+          ('title 'tags)
+          ('tags 'type)
+          ('type 'date)
+          (_ 'date)))
+  (denote-grid--render))
+
+(defun denote-grid-sort-reverse ()
+  "Toggle descending/ascending sort direction."
+  (interactive)
+  (setq denote-grid--sort-desc (not denote-grid--sort-desc))
+  (denote-grid--render))
+
+(defun denote-grid-refresh ()
+  "Refresh items and render state."
+  (interactive)
+  (when denote-grid--source-directory
+    (setq denote-grid--items (denote-grid--collect-items denote-grid--source-directory))
+    (denote-grid--render)))
+
+(defun denote-grid-jump-to-dired ()
+  "Open dired in the directory of the item at point."
+  (interactive)
+  (if-let* ((item (get-text-property (point) 'denote-grid-item))
+            (file (denote-grid-item-path item)))
+      (dired-jump nil file)
+    (user-error "No item at point")))
+
 (defun denote-grid-next-card (&optional n)
+  "Move to the next card."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cur (denote-grid--card-index-at (point)))
@@ -687,6 +782,7 @@ DIRECTION non-nil means move forward, nil means move backward."
       (denote-grid--fill-visible))))
 
 (defun denote-grid-prev-card (&optional n)
+  "Move to the previous card."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cur (denote-grid--card-index-at (point)))
@@ -710,7 +806,7 @@ DIRECTION non-nil means move forward, nil means move backward."
     (denote-grid--fill-visible)))
 
 (defun denote-grid-up-card (&optional n)
-  "Move N rows up predictably, skipping cluster headers seamlessly."
+  "Move N rows up predictably."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let ((steps (or n 1)))
@@ -723,87 +819,6 @@ DIRECTION non-nil means move forward, nil means move backward."
                (target (max 0 (- cur (* steps cols)))))
           (goto-char (aref denote-grid--card-starts target)))))
     (denote-grid--fill-visible)))
-
-(defun denote-grid-open-at-point ()
-  (interactive)
-  (if-let ((it (get-text-property (point) 'denote-grid-item)))
-      (find-file (denote-grid-item-path it))
-    (user-error "No item at point")))
-
-(defun denote-grid-jump-to-dired ()
-  (interactive)
-  (if-let ((it (get-text-property (point) 'denote-grid-item)))
-      (dired-jump nil (denote-grid-item-path it))
-    (user-error "No item at point")))
-
-(defun denote-grid-filter (filter)
-  (interactive (list (read-string "Filter (#tag or text): " denote-grid--filter)))
-  (setq denote-grid--filter filter)
-  (denote-grid--render))
-
-(defun denote-grid-sort-cycle ()
-  (interactive)
-  (setq denote-grid--sort-key
-        (pcase denote-grid--sort-key
-          ('date 'title) ('title 'tags) ('tags 'type) ('type 'date)))
-  (denote-grid--render))
-
-(defun denote-grid-sort-reverse ()
-  (interactive)
-  (setq denote-grid--sort-desc (not denote-grid--sort-desc))
-  (denote-grid--render))
-
-(defun denote-grid-toggle-cluster ()
-  (interactive)
-  (setq denote-grid--cluster-p (not denote-grid--cluster-p))
-  (denote-grid--render))
-
-(defun denote-grid-refresh ()
-  (interactive)
-  (cond
-   (denote-grid--source-dired-buffer
-    (if (buffer-live-p denote-grid--source-dired-buffer)
-        (setq denote-grid--items
-              (with-current-buffer denote-grid--source-dired-buffer
-                (denote-grid--collect-items-from-dired)))
-      (message "denote-grid: source dired buffer is gone, keeping last known items")))
-   (denote-grid--source-directory
-    (setq denote-grid--items (denote-grid--collect-items denote-grid--source-directory))))
-  (denote-grid--prune-image-cache denote-grid--items)
-  (setq denote-grid--clusters-cache nil
-        denote-grid--clusters-cache-key nil)
-  (denote-grid--render))
-
-;;;###autoload
-(defun denote-grid-open (&optional dir)
-  (interactive)
-  (let* ((root (expand-file-name
-                (or dir denote-grid-directory
-                    (and (fboundp 'denote-directory) (denote-directory))
-                    (read-directory-name "Denote directory: "))))
-         (buf (get-buffer-create (format "*denote-grid: %s*" (file-name-nondirectory (directory-file-name root))))))
-    (setq denote-grid--cache-dir (denote-grid--cache-dir-for root))
-    (with-current-buffer buf
-      (denote-grid-mode)
-      (setq denote-grid--source-directory root)
-      (setq denote-grid--items (denote-grid--collect-items root))
-      (denote-grid--render))
-    (switch-to-buffer buf)))
-
-;;;###autoload
-(defun denote-grid-from-dired ()
-  (interactive)
-  (let* ((src (current-buffer))
-         (root (expand-file-name default-directory))
-         (items (denote-grid--collect-items-from-dired))
-         (buf (get-buffer-create (format "*denote-grid: %s*" (file-name-nondirectory (directory-file-name root))))))
-    (setq denote-grid--cache-dir (denote-grid--cache-dir-for root))
-    (with-current-buffer buf
-      (denote-grid-mode)
-      (setq denote-grid--source-dired-buffer src)
-      (setq denote-grid--items items)
-      (denote-grid--render))
-    (switch-to-buffer buf)))
 
 (provide 'denote-grid)
 ;;; denote-grid.el ends here
