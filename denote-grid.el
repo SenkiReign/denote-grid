@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.4
+;; Version: 0.1.5
 
 
 ;;; Code:
@@ -30,6 +30,18 @@
 
 (defcustom denote-grid-note-snippet-length 220
   "How many characters of a note's body to show on its card."
+  :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-thumbnail-oversample 1
+  "Resolution multiplier for generated video/pdf thumbnail files.
+1 renders at display size (fastest). 2 renders at 2x for sharper
+thumbnails on HiDPI displays, at roughly 4x the encode/decode cost."
+  :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-lazy-batch-size 6
+  "How many offscreen thumbnails to generate per idle tick."
   :type 'integer
   :group 'denote-grid)
 
@@ -340,7 +352,8 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
         (call-process denote-grid-ffmpeg-executable nil nil nil
                        "-y" "-ss" "1" "-i" (denote-grid-item-path item)
                        "-frames:v" "1"
-                       "-vf" (format "scale=%d:-1" (* 2 denote-grid-thumbnail-size))
+                       "-vf" (format "scale=%d:-1" (* denote-grid-thumbnail-oversample
+                                                       denote-grid-thumbnail-size))
                        "-loglevel" "quiet" out))
       (unless (file-exists-p out) (setq out nil)))
     (denote-grid--boxed-raster item out "VIDEO" counts)))
@@ -353,21 +366,37 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
         (unless (file-exists-p png)
           (call-process denote-grid-pdftoppm-executable nil nil nil
                          "-png" "-f" "1" "-singlefile"
-                         "-scale-to" (number-to-string (* 2 denote-grid-thumbnail-size))
+                         "-scale-to" (number-to-string (* denote-grid-thumbnail-oversample
+                                                           denote-grid-thumbnail-size))
                          (denote-grid-item-path item) base))
         (when (file-exists-p png) (setq out png))))
     (denote-grid--boxed-raster item out "PDF" counts)))
 
+(defun denote-grid--plain-image (item)
+  "Return an image for ITEM's raw file WITHOUT the SVG wrapper.
+Used when there's no tag-color border to draw, since embedding the
+raster as base64 inside an SVG (`svg-embed') is the single most
+expensive step in thumbnail generation."
+  (let* ((file (denote-grid-item-path item))
+         (w denote-grid-thumbnail-size) (h (round (* w 0.72)))
+         (dim (ignore-errors (image-size (create-image file nil nil) t))))
+    (if (not dim)
+        (denote-grid--placeholder-svg item "IMG" (make-hash-table :test 'equal))
+      (let* ((iw (car dim)) (ih (cdr dim))
+             (scale (min (/ (float w) iw) (/ (float h) ih)))
+             (dw (max 1 (round (* iw scale))))
+             (dh (max 1 (round (* ih scale)))))
+        (create-image file nil nil :width dw :height dh)))))
+
 (defun denote-grid--image-thumb (item counts)
-  (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts))
+  (if (denote-grid--color-for (denote-grid-item-tags item) counts)
+      (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts)
+    (denote-grid--plain-image item)))
 
 (defun denote-grid--get-image (item counts)
   (unless denote-grid--image-cache
     (setq denote-grid--image-cache (make-hash-table :test 'equal)))
-  (let* ((tag-color (denote-grid--color-for (denote-grid-item-tags item) counts))
-         (key (list (denote-grid-item-id item) (denote-grid-item-mtime item)
-                    (denote-grid-item-type item) denote-grid-thumbnail-size
-                    (face-background 'default nil t) tag-color))
+  (let* ((key (denote-grid--cache-key item counts))
          (cached (gethash key denote-grid--image-cache)))
     (or cached
         (puthash key
@@ -405,8 +434,13 @@ growing forever across refreshes, mtime bumps, and theme switches."
 (defvar-local denote-grid--source-dired-buffer nil)
 (defvar-local denote-grid--selection-overlay nil)
 (defvar-local denote-grid--last-win-width nil)
+(defvar-local denote-grid--cached-columns nil)
 (defvar-local denote-grid--clusters-cache nil)
 (defvar-local denote-grid--clusters-cache-key nil)
+(defvar-local denote-grid--pending-fill nil
+  "List of (START END ITEM COUNTS) cards still showing a cheap
+placeholder, waiting for their real (raster) thumbnail.")
+(defvar-local denote-grid--fill-timer nil)
 
 (defvar denote-grid-mode-map
   (let ((m (make-sparse-keymap)))
@@ -438,11 +472,15 @@ growing forever across refreshes, mtime bumps, and theme switches."
   (add-hook 'kill-buffer-hook #'denote-grid--cleanup nil t))
 
 (defun denote-grid--cleanup ()
-  "Release this buffer's cached thumbnails when the grid is killed."
+  "Release this buffer's cached thumbnails and timers when the grid is killed."
+  (when (timerp denote-grid--fill-timer)
+    (cancel-timer denote-grid--fill-timer))
   (when (hash-table-p denote-grid--image-cache)
     (clrhash denote-grid--image-cache))
   (setq denote-grid--image-cache nil
-        denote-grid--clusters-cache nil))
+        denote-grid--clusters-cache nil
+        denote-grid--pending-fill nil
+        denote-grid--fill-timer nil))
 
 (defun denote-grid--header-line ()
   (if denote-grid--current-item
@@ -477,6 +515,7 @@ growing forever across refreshes, mtime bumps, and theme switches."
     (let ((w (window-pixel-width win)))
       (unless (equal w denote-grid--last-win-width)
         (setq denote-grid--last-win-width w)
+        (setq denote-grid--cached-columns nil)
         (denote-grid--render)))))
 
 (defun denote-grid--matches-p (item filter)
@@ -526,11 +565,29 @@ growing forever across refreshes, mtime bumps, and theme switches."
                       (< ca cb))))))
       sorted)))
 
+(defun denote-grid--raster-p (item)
+  (memq (denote-grid-item-type item) '(image video pdf)))
+
+(defun denote-grid--cache-key (item counts)
+  (list (denote-grid-item-id item) (denote-grid-item-mtime item)
+        (denote-grid-item-type item) denote-grid-thumbnail-size
+        (face-background 'default nil t)
+        (denote-grid--color-for (denote-grid-item-tags item) counts)))
+
 (defun denote-grid--render ()
+  ;; Cards with an already-cached thumbnail render fully. Uncached
+  ;; raster (image/video/pdf) cards get a cheap placeholder first;
+  ;; whatever's in the visible window is filled immediately after,
+  ;; and the rest fills in on idle so it never competes with input.
+  (setq denote-grid--cached-columns nil)
+  (when (timerp denote-grid--fill-timer)
+    (cancel-timer denote-grid--fill-timer)
+    (setq denote-grid--fill-timer nil))
   (let ((inhibit-read-only t)
         (pos (point))
         (clusters (and denote-grid--cluster-p (denote-grid--clusters-cached denote-grid--items)))
-        (starts nil))
+        (starts nil)
+        (pending nil))
     (erase-buffer)
     (let* ((items (denote-grid--visible-items))
            (counts (denote-grid--tag-counts items))
@@ -544,10 +601,21 @@ growing forever across refreshes, mtime bumps, and theme switches."
                 (unless (null last-cluster) (insert "\n\n"))
                 (insert (propertize (format "  ·· cluster %d ··\n" c) 'face 'shadow))
                 (setq last-cluster c))))
-          (let ((img (denote-grid--get-image it counts))
-                (start (point)))
+          (let* ((cached (and (hash-table-p denote-grid--image-cache)
+                               (gethash (denote-grid--cache-key it counts) denote-grid--image-cache)))
+                 (deferred (and (not cached) (denote-grid--raster-p it)))
+                 (img (or cached
+                          (if deferred
+                              (denote-grid--placeholder-svg
+                               it (pcase (denote-grid-item-type it)
+                                    ('image "IMG") ('video "VIDEO") ('pdf "PDF") (_ "FILE"))
+                               counts)
+                            (denote-grid--get-image it counts))))
+                 (start (point)))
             (push start starts)
             (insert-image img (denote-grid-item-title it))
+            (when deferred
+              (push (list start (point) it counts) pending))
             (put-text-property start (point) 'denote-grid-item it)
             (put-text-property start (point) 'help-echo
                                 (format "%s\n%s\n%s"
@@ -556,7 +624,57 @@ growing forever across refreshes, mtime bumps, and theme switches."
                                         (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")))
             (insert "  ")))))
     (setq denote-grid--card-starts (vconcat (nreverse starts)))
-    (goto-char (min pos (point-max)))))
+    (setq denote-grid--pending-fill (nreverse pending))
+    (goto-char (min pos (point-max))))
+  (when denote-grid--pending-fill
+    (denote-grid--fill-visible)
+    (denote-grid--schedule-idle-fill)))
+
+(defun denote-grid--apply-thumbnail (card)
+  "Replace CARD's placeholder with its real thumbnail in-place."
+  (pcase-let ((`(,start ,end ,item ,counts) card))
+    (when (<= end (point-max))
+      (let ((inhibit-read-only t)
+            (img (denote-grid--get-image item counts)))
+        (put-text-property start end 'display img)))))
+
+(defun denote-grid--fill-visible ()
+  "Fill placeholders currently inside any window showing this buffer.
+Uses a cheap (possibly slightly stale) `window-end' rather than
+forcing a full redisplay recompute, since this runs on every
+navigation keypress and must stay fast."
+  (when denote-grid--pending-fill
+    (let (still-pending)
+      (dolist (card denote-grid--pending-fill)
+        (let ((start (car card)) (visible nil))
+          (dolist (win (get-buffer-window-list (current-buffer) nil t))
+            (when (and (>= start (window-start win)) (<= start (window-end win)))
+              (setq visible t)))
+          (if visible
+              (denote-grid--apply-thumbnail card)
+            (push card still-pending))))
+      (setq denote-grid--pending-fill (nreverse still-pending)))))
+
+(defun denote-grid--schedule-idle-fill ()
+  (when (timerp denote-grid--fill-timer)
+    (cancel-timer denote-grid--fill-timer))
+  (when denote-grid--pending-fill
+    (setq denote-grid--fill-timer
+          (run-with-idle-timer 0.3 t #'denote-grid--idle-fill-tick (current-buffer)))))
+
+(defun denote-grid--idle-fill-tick (buf)
+  (if (not (buffer-live-p buf))
+      (when (timerp denote-grid--fill-timer) (cancel-timer denote-grid--fill-timer))
+    (with-current-buffer buf
+      (denote-grid--fill-visible)
+      (let ((n 0))
+        (while (and denote-grid--pending-fill (< n denote-grid-lazy-batch-size))
+          (denote-grid--apply-thumbnail (pop denote-grid--pending-fill))
+          (setq n (1+ n))))
+      (unless denote-grid--pending-fill
+        (when (timerp denote-grid--fill-timer)
+          (cancel-timer denote-grid--fill-timer)
+          (setq denote-grid--fill-timer nil))))))
 
 (defun denote-grid--card-index-at (pos)
   (let ((vec denote-grid--card-starts)
@@ -573,23 +691,30 @@ growing forever across refreshes, mtime bumps, and theme switches."
     ans))
 
 (defun denote-grid--calculate-columns ()
-  (let* ((win-w (window-pixel-width))
-         (card-w (+ denote-grid-thumbnail-size 20)))
-    (max 1 (/ win-w card-w))))
+  ;; Cached: `window-pixel-width' forces Emacs to consult live display
+  ;; state, which is cheap once but adds up when called on every
+  ;; down/up keypress. Recomputed only on render and window resize.
+  (or denote-grid--cached-columns
+      (setq denote-grid--cached-columns
+            (let* ((win-w (window-pixel-width))
+                   (card-w (+ denote-grid-thumbnail-size 20)))
+              (max 1 (/ win-w card-w))))))
 
 (defun denote-grid-next-card (&optional n)
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cur (denote-grid--card-index-at (point)))
            (target (min (1- (length denote-grid--card-starts)) (+ cur (or n 1)))))
-      (goto-char (aref denote-grid--card-starts target)))))
+      (goto-char (aref denote-grid--card-starts target))
+      (denote-grid--fill-visible))))
 
 (defun denote-grid-prev-card (&optional n)
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
     (let* ((cur (denote-grid--card-index-at (point)))
            (target (max 0 (- cur (or n 1)))))
-      (goto-char (aref denote-grid--card-starts target)))))
+      (goto-char (aref denote-grid--card-starts target))
+      (denote-grid--fill-visible))))
 
 (defun denote-grid-down-card (&optional n)
   (interactive "p")
@@ -597,7 +722,8 @@ growing forever across refreshes, mtime bumps, and theme switches."
     (let* ((cols (denote-grid--calculate-columns))
            (cur (denote-grid--card-index-at (point)))
            (target (min (1- (length denote-grid--card-starts)) (+ cur (* cols (or n 1))))))
-      (goto-char (aref denote-grid--card-starts target)))))
+      (goto-char (aref denote-grid--card-starts target))
+      (denote-grid--fill-visible))))
 
 (defun denote-grid-up-card (&optional n)
   (interactive "p")
@@ -605,7 +731,8 @@ growing forever across refreshes, mtime bumps, and theme switches."
     (let* ((cols (denote-grid--calculate-columns))
            (cur (denote-grid--card-index-at (point)))
            (target (max 0 (- cur (* cols (or n 1))))))
-      (goto-char (aref denote-grid--card-starts target)))))
+      (goto-char (aref denote-grid--card-starts target))
+      (denote-grid--fill-visible))))
 
 (defun denote-grid-open-at-point ()
   (interactive)
