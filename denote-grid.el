@@ -3,8 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.6
-
+;; Version: 0.1.8
 
 ;;; Code:
 
@@ -34,9 +33,7 @@
   :group 'denote-grid)
 
 (defcustom denote-grid-thumbnail-oversample 1
-  "Resolution multiplier for generated video/pdf thumbnail files.
-1 renders at display size (fastest). 2 renders at 2x for sharper
-thumbnails on HiDPI displays, at roughly 4x the encode/decode cost."
+  "Resolution multiplier for generated video/pdf thumbnail files."
   :type 'integer
   :group 'denote-grid)
 
@@ -46,8 +43,7 @@ thumbnails on HiDPI displays, at roughly 4x the encode/decode cost."
   :group 'denote-grid)
 
 (defcustom denote-grid-ripgrep-executable "rg"
-  "Path to ripgrep executable used for fast full-text search.
-If nil or not found on PATH, `denote-grid' falls back to internal Elisp search."
+  "Path to ripgrep executable used for fast full-text search."
   :type '(choice (const :tag "Disable ripgrep" nil) string)
   :group 'denote-grid)
 
@@ -117,7 +113,6 @@ If nil or not found on PATH, `denote-grid' falls back to internal Elisp search."
           (while (not (eobp))
             (let ((line (buffer-substring-no-properties
                          (line-beginning-position) (line-end-position))))
-              ;; Skip metadata blocks (#+TITLE, #+DATE, --- yaml ---)
               (unless (string-match-p "\\`\\(#\\+\\|---\\)" line)
                 (push line lines)))
             (forward-line 1))
@@ -174,14 +169,10 @@ If nil or not found on PATH, `denote-grid' falls back to internal Elisp search."
   (delq nil (mapcar #'denote-grid--parse-file (denote-grid--dired-visible-files))))
 
 (defun denote-grid--file-contains-p (path query)
-  "Check if PATH contains QUERY (case-insensitive).
-Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
   (let ((rg (and denote-grid-ripgrep-executable
                  (executable-find denote-grid-ripgrep-executable))))
     (if rg
-        ;; Fast path: ripgrep returns exit code 0 on match, 1 on no match
         (zerop (call-process rg nil nil nil "-q" "-i" "-F" query path))
-      ;; Fallback path: pure Elisp buffer search
       (condition-case nil
           (with-temp-buffer
             (insert-file-contents path)
@@ -268,8 +259,7 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
          (color (denote-grid--color-for (denote-grid-item-tags item) counts))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
     (svg-rectangle svg 0 0 w h :fill bg :rx 10)
-    (when color
-      (svg-rectangle svg 0 0 6 h :fill color :rx 3))
+    (when color (svg-rectangle svg 0 0 6 h :fill color :rx 3))
     (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 24 nil nil "…")
               :x 16 :y 26 :fill fg :font-size 15 :font-weight "bold" :font-family "sans-serif")
     (let ((y 48))
@@ -292,8 +282,7 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
     (svg-rectangle svg 0 0 w h :fill bg :rx 10)
     (svg-rectangle svg 0 0 w h :fill accent :fill-opacity "0.12" :rx 10)
-    (when color
-      (svg-rectangle svg 0 0 6 h :fill color :rx 3))
+    (when color (svg-rectangle svg 0 0 6 h :fill color :rx 3))
     (svg-text svg label :x (/ w 2) :y (/ h 2) :fill accent :font-size 22
               :font-weight "bold" :font-family "sans-serif" :text-anchor "middle")
     (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 26 nil nil "…")
@@ -316,12 +305,6 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
     (_ "image/png")))
 
 (defun denote-grid--boxed-raster (item raw-file label counts)
-  "Render RAW-FILE centered in a fixed W×H card canvas.
-Embeds the raster as base64 (`svg-embed') so every card is the exact
-same physical size, keeping the grid aligned. A `file://' href would
-be cheaper, but librsvg sandboxes external file references when the
-SVG itself is loaded from an in-memory string rather than an actual
-file on disk, so that content silently fails to render."
   (if (null raw-file)
       (denote-grid--placeholder-svg item label counts)
     (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
@@ -343,8 +326,7 @@ file on disk, so that content silently fails to render."
               (progn
                 (svg-embed svg raw-file (denote-grid--mime-for raw-file) nil
                            :x x :y y :width dw :height dh)
-                (when color
-                  (svg-rectangle svg 0 0 6 h :fill color :rx 3))
+                (when color (svg-rectangle svg 0 0 6 h :fill color :rx 3))
                 (svg-image svg :ascent 'center))
             (error (denote-grid--placeholder-svg item label counts))))))))
 
@@ -398,9 +380,6 @@ file on disk, so that content silently fails to render."
                  denote-grid--image-cache))))
 
 (defun denote-grid--prune-image-cache (items)
-  "Drop cache entries for ITEM ids no longer present.
-Keeps memory bounded to the current buffer's item set instead of
-growing forever across refreshes, mtime bumps, and theme switches."
   (when (hash-table-p denote-grid--image-cache)
     (let ((live-ids (make-hash-table :test 'equal)))
       (dolist (it items) (puthash (denote-grid-item-id it) t live-ids))
@@ -424,9 +403,7 @@ growing forever across refreshes, mtime bumps, and theme switches."
 (defvar-local denote-grid--last-win-width nil)
 (defvar-local denote-grid--clusters-cache nil)
 (defvar-local denote-grid--clusters-cache-key nil)
-(defvar-local denote-grid--pending-fill nil
-  "List of (START END ITEM COUNTS) cards still showing a cheap
-placeholder, waiting for their real (raster) thumbnail.")
+(defvar-local denote-grid--pending-fill nil)
 (defvar-local denote-grid--fill-timer nil)
 
 (defvar denote-grid-mode-map
@@ -451,15 +428,15 @@ placeholder, waiting for their real (raster) thumbnail.")
     m))
 
 (define-derived-mode denote-grid-mode special-mode "Denote-Grid"
-  "Major mode for browsing denote files as an are.na-style grid."
-  (setq truncate-lines nil)
+  "Major mode for browsing denote files as an image-dired style grid."
+  (setq truncate-lines t)
   (setq header-line-format '(:eval (denote-grid--header-line)))
   (add-hook 'post-command-hook #'denote-grid--update-point-info nil t)
   (add-hook 'window-size-change-functions #'denote-grid--on-window-size-change nil t)
+  (add-hook 'text-scale-mode-hook #'denote-grid--render nil t)
   (add-hook 'kill-buffer-hook #'denote-grid--cleanup nil t))
 
 (defun denote-grid--cleanup ()
-  "Release this buffer's cached thumbnails and timers when the grid is killed."
   (when (timerp denote-grid--fill-timer)
     (cancel-timer denote-grid--fill-timer))
   (when (hash-table-p denote-grid--image-cache)
@@ -496,6 +473,16 @@ placeholder, waiting for their real (raster) thumbnail.")
         (delete-overlay denote-grid--selection-overlay))))
   (force-mode-line-update))
 
+(defun denote-grid--cards-per-row ()
+  "Calculate how many cards fit on a line, capped at 5 max."
+  (if-let* ((win (get-buffer-window (current-buffer)))
+            (win-width (window-body-width win t))
+            (space-width (frame-char-width))
+            (card-width (+ denote-grid-thumbnail-size (* space-width 2))))
+      ;; Clamp between 1 minimum and 5 maximum cards per row
+      (min 5 (max 1 (floor win-width card-width)))
+    1))
+
 (defun denote-grid--on-window-size-change (win)
   (when (and (eq (window-buffer win) (current-buffer))
              (derived-mode-p 'denote-grid-mode))
@@ -525,7 +512,6 @@ placeholder, waiting for their real (raster) thumbnail.")
     ('type (symbol-name (denote-grid-item-type item)))))
 
 (defun denote-grid--clusters-cached (items)
-  "Recompute clusters only when ITEMS actually changed."
   (let ((key (mapcar (lambda (it) (denote-grid-item-id it)) items)))
     (unless (equal key denote-grid--clusters-cache-key)
       (setq denote-grid--clusters-cache (denote-grid--clusters items)
@@ -561,10 +547,7 @@ placeholder, waiting for their real (raster) thumbnail.")
         (denote-grid--color-for (denote-grid-item-tags item) counts)))
 
 (defun denote-grid--render ()
-  ;; Cards with an already-cached thumbnail render fully. Uncached
-  ;; raster (image/video/pdf) cards get a cheap placeholder first;
-  ;; whatever's in the visible window is filled immediately after,
-  ;; and the rest fills in on idle so it never competes with input.
+  "Render grid using hard line breaks like `image-dired'."
   (when (timerp denote-grid--fill-timer)
     (cancel-timer denote-grid--fill-timer)
     (setq denote-grid--fill-timer nil))
@@ -572,7 +555,10 @@ placeholder, waiting for their real (raster) thumbnail.")
         (pos (point))
         (clusters (and denote-grid--cluster-p (denote-grid--clusters-cached denote-grid--items)))
         (starts nil)
-        (pending nil))
+        (pending nil)
+        (cols (denote-grid--cards-per-row))
+        (count 0))
+    (setq-local truncate-lines t)
     (erase-buffer)
     (let* ((items (denote-grid--visible-items))
            (counts (denote-grid--tag-counts items))
@@ -583,9 +569,10 @@ placeholder, waiting for their real (raster) thumbnail.")
           (when (and denote-grid--cluster-p clusters)
             (let ((c (gethash (denote-grid-item-id it) clusters)))
               (unless (eq c last-cluster)
-                (unless (null last-cluster) (insert "\n\n"))
-                (insert (propertize (format "  ·· cluster %d ··\n" c) 'face 'shadow))
-                (setq last-cluster c))))
+                (unless (null last-cluster) (insert "\n"))
+                (insert (propertize (format "·· cluster %d ··\n" c) 'face 'shadow))
+                (setq last-cluster c)
+                (setq count 0))))
           (let* ((cached (and (hash-table-p denote-grid--image-cache)
                                (gethash (denote-grid--cache-key it counts) denote-grid--image-cache)))
                  (deferred (and (not cached) (denote-grid--raster-p it)))
@@ -607,7 +594,10 @@ placeholder, waiting for their real (raster) thumbnail.")
                                         (denote-grid-item-title it)
                                         (denote-grid-item-id it)
                                         (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")))
-            (insert "  ")))))
+            (setq count (1+ count))
+            (if (= (mod count cols) 0)
+                (insert "\n")
+              (insert " "))))))
     (setq denote-grid--card-starts (vconcat (nreverse starts)))
     (setq denote-grid--pending-fill (nreverse pending))
     (goto-char (min pos (point-max))))
@@ -616,7 +606,6 @@ placeholder, waiting for their real (raster) thumbnail.")
     (denote-grid--schedule-idle-fill)))
 
 (defun denote-grid--apply-thumbnail (card)
-  "Replace CARD's placeholder with its real thumbnail in-place."
   (pcase-let ((`(,start ,end ,item ,counts) card))
     (when (<= end (point-max))
       (let ((inhibit-read-only t)
@@ -624,10 +613,6 @@ placeholder, waiting for their real (raster) thumbnail.")
         (put-text-property start end 'display img)))))
 
 (defun denote-grid--fill-visible ()
-  "Fill placeholders currently inside any window showing this buffer.
-Uses a cheap (possibly slightly stale) `window-end' rather than
-forcing a full redisplay recompute, since this runs on every
-navigation keypress and must stay fast."
   (when denote-grid--pending-fill
     (let (still-pending)
       (dolist (card denote-grid--pending-fill)
@@ -675,25 +660,17 @@ navigation keypress and must stay fast."
           (setq high (1- mid)))))
     ans))
 
-(defun denote-grid--snap-to-nearest-card ()
-  "Move point to the start of the card at/just before point."
-  (when (> (length denote-grid--card-starts) 0)
-    (let ((idx (denote-grid--card-index-at (point))))
-      (goto-char (aref denote-grid--card-starts (max 0 idx))))))
-
-(defun denote-grid--move-to-card-line (step)
-  "Move one visual line via STEP (1 down, -1 up), skipping over
-non-card lines (cluster headers, blank separators between clusters)
-so down/up can cross cluster boundaries instead of getting stuck."
-  (let ((tries 0)
-        (before (point)))
-    (while (and (< tries 8)
-                (progn
-                  (ignore-errors (if (> step 0) (next-line 1) (previous-line 1)))
-                  (and (not (get-text-property (point) 'denote-grid-item))
-                       (not (= (point) before)))))
-      (setq before (point))
-      (setq tries (1+ tries)))))
+(defun denote-grid--snap-to-card (&optional direction)
+  "Snap point to the nearest valid card starting position.
+DIRECTION non-nil means move forward, nil means move backward."
+  (let ((dir (or direction 1)))
+    (while (and (not (get-text-property (point) 'denote-grid-item))
+                (not (if (> dir 0) (eobp) (bobp))))
+      (forward-line dir))
+    (when-let ((item (get-text-property (point) 'denote-grid-item)))
+      (let ((idx (denote-grid--card-index-at (point))))
+        (when (>= idx 0)
+          (goto-char (aref denote-grid--card-starts idx)))))))
 
 (defun denote-grid-next-card (&optional n)
   (interactive "p")
@@ -712,24 +689,33 @@ so down/up can cross cluster boundaries instead of getting stuck."
       (denote-grid--fill-visible))))
 
 (defun denote-grid-down-card (&optional n)
-  ;; Uses Emacs's own visual-line motion (as `next-line' does) instead
-  ;; of estimating a fixed column count: the estimate (window width /
-  ;; assumed card width) doesn't always match how the buffer actually
-  ;; wraps, which caused down/up to land on the wrong card. Visual
-  ;; motion is pixel-accurate for image-heavy lines, then we snap to
-  ;; the nearest real card boundary. `--move-to-card-line' additionally
-  ;; skips over cluster headers/separators so this works in cluster view.
+  "Move N rows down predictably, skipping cluster headers seamlessly."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
-    (dotimes (_ (or n 1)) (denote-grid--move-to-card-line 1))
-    (denote-grid--snap-to-nearest-card)
+    (let ((steps (or n 1)))
+      (if denote-grid--cluster-p
+          (progn
+            (forward-line steps)
+            (denote-grid--snap-to-card 1))
+        (let* ((cols (denote-grid--cards-per-row))
+               (cur (denote-grid--card-index-at (point)))
+               (target (min (1- (length denote-grid--card-starts)) (+ cur (* steps cols)))))
+          (goto-char (aref denote-grid--card-starts target)))))
     (denote-grid--fill-visible)))
 
 (defun denote-grid-up-card (&optional n)
+  "Move N rows up predictably, skipping cluster headers seamlessly."
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
-    (dotimes (_ (or n 1)) (denote-grid--move-to-card-line -1))
-    (denote-grid--snap-to-nearest-card)
+    (let ((steps (or n 1)))
+      (if denote-grid--cluster-p
+          (progn
+            (forward-line (- steps))
+            (denote-grid--snap-to-card -1))
+        (let* ((cols (denote-grid--cards-per-row))
+               (cur (denote-grid--card-index-at (point)))
+               (target (max 0 (- cur (* steps cols)))))
+          (goto-char (aref denote-grid--card-starts target)))))
     (denote-grid--fill-visible)))
 
 (defun denote-grid-open-at-point ()
@@ -777,8 +763,6 @@ so down/up can cross cluster boundaries instead of getting stuck."
       (message "denote-grid: source dired buffer is gone, keeping last known items")))
    (denote-grid--source-directory
     (setq denote-grid--items (denote-grid--collect-items denote-grid--source-directory))))
-  ;; Prune only entries for items that no longer exist, instead of wiping
-  ;; the whole cache (which would force re-rendering every visible card).
   (denote-grid--prune-image-cache denote-grid--items)
   (setq denote-grid--clusters-cache nil
         denote-grid--clusters-cache-key nil)
