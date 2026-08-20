@@ -9,7 +9,9 @@ Cluster view shows all connected notes side by side. Easily query your notes in 
 
 * **Denote-dired view:** Follows denote-dired matching. (whatever files are currently visible in a `dired` or `denote-dired` buffer)
 * **Cluster view:** Groups linked notes together
+* **Orphan view:** Shows all unlinked notes
 * **Filtered view:** Filter/query based on tags or substring
+
 
 ### Thumbnail generation
 * **Image Files:** Native Emacs image scaling (zero dependencies).
