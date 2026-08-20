@@ -5,6 +5,8 @@ Cluster view shows all connected notes side by side. Easily query your notes in 
 
 <img width="1379" height="942" alt="gridlight" src="https://github.com/user-attachments/assets/6817a495-5061-4120-a76d-068f11768d32" />
 
+## Cluster view
+<img width="1920" height="1013" alt="cluster" src="https://github.com/user-attachments/assets/d90422f2-8b6e-420a-92b4-e0417d958f1f" />
 
 
 * **Denote-dired view:** Follows denote-dired matching. (whatever files are currently visible in a `dired` or `denote-dired` buffer)
