@@ -4,7 +4,7 @@
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
 ;; Version: 0.2.0
-
+;; License: GPL-2.0-or-later
 ;;; Commentary:
 ;; Grid view for denote in emacs
 
