@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.5
+;; Version: 0.1.6
 
 
 ;;; Code:
@@ -316,6 +316,12 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
     (_ "image/png")))
 
 (defun denote-grid--boxed-raster (item raw-file label counts)
+  "Render RAW-FILE centered in a fixed W×H card canvas.
+Embeds the raster as base64 (`svg-embed') so every card is the exact
+same physical size, keeping the grid aligned. A `file://' href would
+be cheaper, but librsvg sandboxes external file references when the
+SVG itself is loaded from an in-memory string rather than an actual
+file on disk, so that content silently fails to render."
   (if (null raw-file)
       (denote-grid--placeholder-svg item label counts)
     (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
@@ -372,26 +378,8 @@ Uses `ripgrep' if available; otherwise falls back to pure Elisp buffer search."
         (when (file-exists-p png) (setq out png))))
     (denote-grid--boxed-raster item out "PDF" counts)))
 
-(defun denote-grid--plain-image (item)
-  "Return an image for ITEM's raw file WITHOUT the SVG wrapper.
-Used when there's no tag-color border to draw, since embedding the
-raster as base64 inside an SVG (`svg-embed') is the single most
-expensive step in thumbnail generation."
-  (let* ((file (denote-grid-item-path item))
-         (w denote-grid-thumbnail-size) (h (round (* w 0.72)))
-         (dim (ignore-errors (image-size (create-image file nil nil) t))))
-    (if (not dim)
-        (denote-grid--placeholder-svg item "IMG" (make-hash-table :test 'equal))
-      (let* ((iw (car dim)) (ih (cdr dim))
-             (scale (min (/ (float w) iw) (/ (float h) ih)))
-             (dw (max 1 (round (* iw scale))))
-             (dh (max 1 (round (* ih scale)))))
-        (create-image file nil nil :width dw :height dh)))))
-
 (defun denote-grid--image-thumb (item counts)
-  (if (denote-grid--color-for (denote-grid-item-tags item) counts)
-      (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts)
-    (denote-grid--plain-image item)))
+  (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts))
 
 (defun denote-grid--get-image (item counts)
   (unless denote-grid--image-cache
@@ -434,7 +422,6 @@ growing forever across refreshes, mtime bumps, and theme switches."
 (defvar-local denote-grid--source-dired-buffer nil)
 (defvar-local denote-grid--selection-overlay nil)
 (defvar-local denote-grid--last-win-width nil)
-(defvar-local denote-grid--cached-columns nil)
 (defvar-local denote-grid--clusters-cache nil)
 (defvar-local denote-grid--clusters-cache-key nil)
 (defvar-local denote-grid--pending-fill nil
@@ -515,7 +502,6 @@ placeholder, waiting for their real (raster) thumbnail.")
     (let ((w (window-pixel-width win)))
       (unless (equal w denote-grid--last-win-width)
         (setq denote-grid--last-win-width w)
-        (setq denote-grid--cached-columns nil)
         (denote-grid--render)))))
 
 (defun denote-grid--matches-p (item filter)
@@ -579,7 +565,6 @@ placeholder, waiting for their real (raster) thumbnail.")
   ;; raster (image/video/pdf) cards get a cheap placeholder first;
   ;; whatever's in the visible window is filled immediately after,
   ;; and the rest fills in on idle so it never competes with input.
-  (setq denote-grid--cached-columns nil)
   (when (timerp denote-grid--fill-timer)
     (cancel-timer denote-grid--fill-timer)
     (setq denote-grid--fill-timer nil))
@@ -690,15 +675,25 @@ navigation keypress and must stay fast."
           (setq high (1- mid)))))
     ans))
 
-(defun denote-grid--calculate-columns ()
-  ;; Cached: `window-pixel-width' forces Emacs to consult live display
-  ;; state, which is cheap once but adds up when called on every
-  ;; down/up keypress. Recomputed only on render and window resize.
-  (or denote-grid--cached-columns
-      (setq denote-grid--cached-columns
-            (let* ((win-w (window-pixel-width))
-                   (card-w (+ denote-grid-thumbnail-size 20)))
-              (max 1 (/ win-w card-w))))))
+(defun denote-grid--snap-to-nearest-card ()
+  "Move point to the start of the card at/just before point."
+  (when (> (length denote-grid--card-starts) 0)
+    (let ((idx (denote-grid--card-index-at (point))))
+      (goto-char (aref denote-grid--card-starts (max 0 idx))))))
+
+(defun denote-grid--move-to-card-line (step)
+  "Move one visual line via STEP (1 down, -1 up), skipping over
+non-card lines (cluster headers, blank separators between clusters)
+so down/up can cross cluster boundaries instead of getting stuck."
+  (let ((tries 0)
+        (before (point)))
+    (while (and (< tries 8)
+                (progn
+                  (ignore-errors (if (> step 0) (next-line 1) (previous-line 1)))
+                  (and (not (get-text-property (point) 'denote-grid-item))
+                       (not (= (point) before)))))
+      (setq before (point))
+      (setq tries (1+ tries)))))
 
 (defun denote-grid-next-card (&optional n)
   (interactive "p")
@@ -717,22 +712,25 @@ navigation keypress and must stay fast."
       (denote-grid--fill-visible))))
 
 (defun denote-grid-down-card (&optional n)
+  ;; Uses Emacs's own visual-line motion (as `next-line' does) instead
+  ;; of estimating a fixed column count: the estimate (window width /
+  ;; assumed card width) doesn't always match how the buffer actually
+  ;; wraps, which caused down/up to land on the wrong card. Visual
+  ;; motion is pixel-accurate for image-heavy lines, then we snap to
+  ;; the nearest real card boundary. `--move-to-card-line' additionally
+  ;; skips over cluster headers/separators so this works in cluster view.
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
-    (let* ((cols (denote-grid--calculate-columns))
-           (cur (denote-grid--card-index-at (point)))
-           (target (min (1- (length denote-grid--card-starts)) (+ cur (* cols (or n 1))))))
-      (goto-char (aref denote-grid--card-starts target))
-      (denote-grid--fill-visible))))
+    (dotimes (_ (or n 1)) (denote-grid--move-to-card-line 1))
+    (denote-grid--snap-to-nearest-card)
+    (denote-grid--fill-visible)))
 
 (defun denote-grid-up-card (&optional n)
   (interactive "p")
   (when (> (length denote-grid--card-starts) 0)
-    (let* ((cols (denote-grid--calculate-columns))
-           (cur (denote-grid--card-index-at (point)))
-           (target (max 0 (- cur (* cols (or n 1))))))
-      (goto-char (aref denote-grid--card-starts target))
-      (denote-grid--fill-visible))))
+    (dotimes (_ (or n 1)) (denote-grid--move-to-card-line -1))
+    (denote-grid--snap-to-nearest-card)
+    (denote-grid--fill-visible)))
 
 (defun denote-grid-open-at-point ()
   (interactive)
