@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 0.1.8
+;; Version: 0.1.9
 
 ;;; Code:
 
@@ -527,8 +527,14 @@
                                 (vb (denote-grid--sort-value b denote-grid--sort-key)))
                             (if denote-grid--sort-desc (string> va vb) (string< va vb)))))))
     (if denote-grid--cluster-p
-        (let ((clusters (denote-grid--clusters-cached sorted)))
-          (sort (copy-sequence sorted)
+        (let* ((clusters (denote-grid--clusters-cached sorted))
+               (links (denote-grid--links sorted))
+               ;; Keep only items that have at least one link in `links`
+               (connected (cl-remove-if-not
+                           (lambda (it)
+                             (> (length (gethash (denote-grid-item-id it) links)) 0))
+                           sorted)))
+          (sort (copy-sequence connected)
                 (lambda (a b)
                   (let ((ca (gethash (denote-grid-item-id a) clusters))
                         (cb (gethash (denote-grid-item-id b) clusters)))
