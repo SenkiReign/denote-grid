@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.1
+;; Version: 0.2.2
 
 ;;; Code:
 
@@ -140,12 +140,18 @@
          :snippet-fetched nil :snippet "")))))
 
 (defun denote-grid--collect-items (root)
-  (let (items)
-    (dolist (f (directory-files-recursively root ".*" nil
-                                           (lambda (d) (not (string-prefix-p "." (file-name-nondirectory d))))))
-      (unless (string-prefix-p "." (file-name-nondirectory f))
-        (when-let ((item (denote-grid--parse-file f)))
-          (push item items))))
+  "Collect all denote items under ROOT.
+ROOT can be a directory path string or a list of directory path strings."
+  (let ((dirs (if (listp root) root (list root)))
+        items)
+    (dolist (dir dirs)
+      (when (and dir (file-directory-p dir))
+        (dolist (f (directory-files-recursively
+                    dir ".*" nil
+                    (lambda (d) (not (string-prefix-p "." (file-name-nondirectory d))))))
+          (unless (string-prefix-p "." (file-name-nondirectory f))
+            (when-let ((item (denote-grid--parse-file f)))
+              (push item items))))))
     (nreverse items)))
 
 (defun denote-grid--dired-visible-files ()
@@ -695,18 +701,23 @@ DIRECTION non-nil means move forward, nil means move backward."
 ;;;###autoload
 (defun denote-grid-open (&optional dir)
   "Open the denote grid view for DIR.
-If DIR is nil, automatically fallback to `denote-directory`."
+If DIR is nil, automatically fallback to `denote-directory` (or its first
+entry if `denote-directory` is a list)."
   (interactive
    (list (when current-prefix-arg
-           (read-directory-name "Denote directory: " denote-directory))))
-  (let* ((root (expand-file-name (or dir denote-directory)))
-         (buf-name (format "*denote-grid: %s*" (file-name-nondirectory (directory-file-name root))))
+           (let ((default-dir (if (listp denote-directory)
+                                  (car denote-directory)
+                                denote-directory)))
+             (read-directory-name "Denote directory: " default-dir)))))
+  (let* ((target (or dir denote-directory))
+         (primary-dir (expand-file-name (if (listp target) (car target) target)))
+         (buf-name (format "*denote-grid: %s*" (file-name-nondirectory (directory-file-name primary-dir))))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
       (denote-grid-mode)
-      (setq-local denote-grid--source-directory root)
-      (setq-local denote-grid--cache-dir (denote-grid--cache-dir-for root))
-      (setq-local denote-grid--items (denote-grid--collect-items root))
+      (setq-local denote-grid--source-directory target)
+      (setq-local denote-grid--cache-dir (denote-grid--cache-dir-for primary-dir))
+      (setq-local denote-grid--items (denote-grid--collect-items target))
       (denote-grid--render))
     (switch-to-buffer buf)))
 
@@ -740,7 +751,10 @@ If DIR is nil, automatically fallback to `denote-directory`."
          (buffer-live-p denote-grid--source-dired-buffer))
     (switch-to-buffer denote-grid--source-dired-buffer))
    (denote-grid--source-directory
-    (dired denote-grid--source-directory))
+    (let ((target (if (listp denote-grid--source-directory)
+                      (car denote-grid--source-directory)
+                    denote-grid--source-directory)))
+      (dired target)))
    (t (user-error "No Dired source available"))))
 
 (defun denote-grid-open-at-point ()
