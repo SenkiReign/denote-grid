@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.2
+;; Version: 0.2.3
 
 ;;; Code:
 
@@ -744,18 +744,18 @@ entry if `denote-directory` is a list)."
     (switch-to-buffer buf)))
 
 (defun denote-grid-jump-to-dired ()
-  "Jump back to the original Dired buffer or open Dired for current grid root."
+  "Jump to the file under point in a Dired buffer."
   (interactive)
-  (cond
-   ((and denote-grid--source-dired-buffer
-         (buffer-live-p denote-grid--source-dired-buffer))
-    (switch-to-buffer denote-grid--source-dired-buffer))
-   (denote-grid--source-directory
-    (let ((target (if (listp denote-grid--source-directory)
-                      (car denote-grid--source-directory)
-                    denote-grid--source-directory)))
-      (dired target)))
-   (t (user-error "No Dired source available"))))
+  (if-let* ((it (get-text-property (point) 'denote-grid-item))
+            (file (expand-file-name (denote-grid-item-path it))))
+      (let ((dired-buf denote-grid--source-dired-buffer))
+        (if (and dired-buf (buffer-live-p dired-buf))
+            (progn
+              (pop-to-buffer dired-buf)
+              (dired-goto-file file))
+          (dired (file-name-directory file))
+          (dired-goto-file file)))
+    (user-error "No denote item at point")))
 
 (defun denote-grid-open-at-point ()
   "Open the file corresponding to the card at point."
