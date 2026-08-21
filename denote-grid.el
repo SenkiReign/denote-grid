@@ -3,10 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.0
-;; License: GPL-2.0-or-later
-;;; Commentary:
-;; Grid view for denote in emacs
+;; Version: 0.2.1
 
 ;;; Code:
 
@@ -350,7 +347,7 @@
                       "-y" "-ss" "1" "-i" (denote-grid-item-path item)
                       "-frames:v" "1"
                       "-vf" (format "scale=%d:-1" (* denote-grid-thumbnail-oversample
-                                                     denote-grid-thumbnail-size))
+                                                    denote-grid-thumbnail-size))
                       "-loglevel" "quiet" out))
       (unless (file-exists-p out) (setq out nil)))
     (denote-grid--boxed-raster item out "VIDEO" counts)))
@@ -364,7 +361,7 @@
           (call-process denote-grid-pdftoppm-executable nil nil nil
                         "-png" "-f" "1" "-singlefile"
                         "-scale-to" (number-to-string (* denote-grid-thumbnail-oversample
-                                                          denote-grid-thumbnail-size))
+                                                         denote-grid-thumbnail-size))
                         (denote-grid-item-path item) base))
         (when (file-exists-p png) (setq out png))))
     (denote-grid--boxed-raster item out "PDF" counts)))
@@ -533,10 +530,10 @@
   (let* ((filtered (cl-remove-if-not (lambda (it) (denote-grid--matches-p it denote-grid--filter))
                                      denote-grid--items))
          (sorted (sort (copy-sequence filtered)
-                       (lambda (a b)
-                         (let ((va (denote-grid--sort-value a denote-grid--sort-key))
-                               (vb (denote-grid--sort-value b denote-grid--sort-key)))
-                           (if denote-grid--sort-desc (string> va vb) (string< va vb))))))
+                        (lambda (a b)
+                          (let ((va (denote-grid--sort-value a denote-grid--sort-key))
+                                (vb (denote-grid--sort-value b denote-grid--sort-key)))
+                            (if denote-grid--sort-desc (string> va vb) (string< va vb))))))
          (links (denote-grid--links sorted)))
     (cond
      (denote-grid--cluster-p
@@ -713,6 +710,39 @@ If DIR is nil, automatically fallback to `denote-directory`."
       (denote-grid--render))
     (switch-to-buffer buf)))
 
+;;;###autoload
+(defun denote-grid-from-dired ()
+  "Open denote grid view displaying files from the current Dired buffer."
+  (interactive)
+  (unless (derived-mode-p 'dired-mode)
+    (user-error "denote-grid: not in a Dired buffer"))
+  (let* ((dired-buf (current-buffer))
+         (dir (expand-file-name default-directory))
+         (buf-name (format "*denote-grid dired: %s*" (buffer-name dired-buf)))
+         (buf (get-buffer-create buf-name))
+         (items (denote-grid--collect-items-from-dired)))
+    (unless items
+      (user-error "denote-grid: no valid denote files found in this Dired buffer"))
+    (with-current-buffer buf
+      (denote-grid-mode)
+      (setq-local denote-grid--source-directory dir)
+      (setq-local denote-grid--source-dired-buffer dired-buf)
+      (setq-local denote-grid--cache-dir (denote-grid--cache-dir-for dir))
+      (setq-local denote-grid--items items)
+      (denote-grid--render))
+    (switch-to-buffer buf)))
+
+(defun denote-grid-jump-to-dired ()
+  "Jump back to the original Dired buffer or open Dired for current grid root."
+  (interactive)
+  (cond
+   ((and denote-grid--source-dired-buffer
+         (buffer-live-p denote-grid--source-dired-buffer))
+    (switch-to-buffer denote-grid--source-dired-buffer))
+   (denote-grid--source-directory
+    (dired denote-grid--source-directory))
+   (t (user-error "No Dired source available"))))
+
 (defun denote-grid-open-at-point ()
   "Open the file corresponding to the card at point."
   (interactive)
@@ -743,85 +773,60 @@ If DIR is nil, automatically fallback to `denote-directory`."
   (denote-grid--render))
 
 (defun denote-grid-sort-cycle ()
-  "Cycle through sorting criteria."
+  "Cycle through sorting keys (date -> title -> tags -> type)."
   (interactive)
   (setq denote-grid--sort-key
         (pcase denote-grid--sort-key
           ('date 'title)
           ('title 'tags)
           ('tags 'type)
-          ('type 'date)
           (_ 'date)))
   (denote-grid--render))
 
 (defun denote-grid-sort-reverse ()
-  "Toggle descending/ascending sort direction."
+  "Toggle ascending/descending order for current sort."
   (interactive)
   (setq denote-grid--sort-desc (not denote-grid--sort-desc))
   (denote-grid--render))
 
 (defun denote-grid-refresh ()
-  "Refresh items and render state."
+  "Refresh the grid buffer."
   (interactive)
   (when denote-grid--source-directory
-    (setq denote-grid--items (denote-grid--collect-items denote-grid--source-directory))
+    (setq denote-grid--items
+          (if (and denote-grid--source-dired-buffer
+                   (buffer-live-p denote-grid--source-dired-buffer))
+              (with-current-buffer denote-grid--source-dired-buffer
+                (denote-grid--collect-items-from-dired))
+            (denote-grid--collect-items denote-grid--source-directory)))
+    (denote-grid--prune-image-cache denote-grid--items)
     (denote-grid--render)))
 
-(defun denote-grid-jump-to-dired ()
-  "Open dired in the directory of the item at point."
-  (interactive)
-  (if-let* ((item (get-text-property (point) 'denote-grid-item))
-            (file (denote-grid-item-path item)))
-      (dired-jump nil file)
-    (user-error "No item at point")))
-
-(defun denote-grid-next-card (&optional n)
-  "Move to the next card."
+(defun denote-grid-next-card (&optional count)
+  "Move cursor forward by COUNT cards."
   (interactive "p")
-  (when (> (length denote-grid--card-starts) 0)
-    (let* ((cur (denote-grid--card-index-at (point)))
-           (target (min (1- (length denote-grid--card-starts)) (+ cur (or n 1)))))
-      (goto-char (aref denote-grid--card-starts target))
-      (denote-grid--fill-visible))))
+  (let* ((cnt (or count 1))
+         (idx (denote-grid--card-index-at (point)))
+         (max-idx (1- (length denote-grid--card-starts)))
+         (target (min max-idx (+ idx cnt))))
+    (when (and (>= target 0) denote-grid--card-starts)
+      (goto-char (aref denote-grid--card-starts target)))))
 
-(defun denote-grid-prev-card (&optional n)
-  "Move to the previous card."
+(defun denote-grid-prev-card (&optional count)
+  "Move cursor backward by COUNT cards."
   (interactive "p")
-  (when (> (length denote-grid--card-starts) 0)
-    (let* ((cur (denote-grid--card-index-at (point)))
-           (target (max 0 (- cur (or n 1)))))
-      (goto-char (aref denote-grid--card-starts target))
-      (denote-grid--fill-visible))))
+  (denote-grid-next-card (- (or count 1))))
 
-(defun denote-grid-down-card (&optional n)
-  "Move N rows down predictably, skipping cluster headers seamlessly."
+(defun denote-grid-down-card (&optional count)
+  "Move cursor down by COUNT rows in the grid."
   (interactive "p")
-  (when (> (length denote-grid--card-starts) 0)
-    (let ((steps (or n 1)))
-      (if denote-grid--cluster-p
-          (progn
-            (forward-line steps)
-            (denote-grid--snap-to-card 1))
-        (let* ((cols (denote-grid--cards-per-row))
-               (cur (denote-grid--card-index-at (point)))
-               (target (min (1- (length denote-grid--card-starts)) (+ cur (* steps cols)))))
-          (goto-char (aref denote-grid--card-starts target)))))
-    (denote-grid--fill-visible)))
+  (let ((cols (denote-grid--cards-per-row)))
+    (denote-grid-next-card (* (or count 1) cols))))
 
-(defun denote-grid-up-card (&optional n)
-  "Move N rows up predictably."
+(defun denote-grid-up-card (&optional count)
+  "Move cursor up by COUNT rows in the grid."
   (interactive "p")
-  (when (> (length denote-grid--card-starts) 0)
-    (let ((steps (or n 1)))
-      (if denote-grid--cluster-p
-          (progn
-            (forward-line (- steps))
-            (denote-grid--snap-to-card -1))
-        (let* ((cols (denote-grid--cards-per-row))
-               (cur (denote-grid--card-index-at (point)))
-               (target (max 0 (- cur (* steps cols)))))
-          (goto-char (aref denote-grid--card-starts target)))))
-    (denote-grid--fill-visible)))
+  (denote-grid-down-card (- (or count 1))))
 
 (provide 'denote-grid)
 ;;; denote-grid.el ends here
