@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.3
+;; Version: 0.2.4
 
 ;;; Code:
 
@@ -21,6 +21,11 @@
 (defcustom denote-grid-thumbnail-size 220
   "Max width/height in pixels for grid thumbnails."
   :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-front-matter-regexp "\\`\\(#\\+\\|---\\|\\+\\+\\+\\|#let\\|#set\\)"
+  "Regexp matching lines to strip as front matter when generating note snippets."
+  :type 'regexp
   :group 'denote-grid)
 
 (defcustom denote-grid-note-snippet-length 220
@@ -109,7 +114,7 @@
           (while (not (eobp))
             (let ((line (buffer-substring-no-properties
                          (line-beginning-position) (line-end-position))))
-              (unless (string-match-p "\\`\\(#\\+\\|---\\)" line)
+              (unless (string-match-p denote-grid-front-matter-regexp line)
                 (push line lines)))
             (forward-line 1))
           (let ((body (string-trim (mapconcat #'identity (nreverse lines) "\n"))))
