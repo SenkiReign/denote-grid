@@ -16,7 +16,7 @@ Cluster view shows all connected notes side by side. Easily query your notes in 
 
 
 ### Thumbnail generation
-* **Image Files:** Native Emacs image scaling (zero dependencies).
+* **Image Files:** if ffmpeg is not available native Emacs image scaling
 * **Notes (`.md`, `.org`, `.txt`):** Synthesizes a small SVG "card" on the fly using title, body snippet, and tags (uses `svg.el`, built into Emacs 27+).
 * **Video Files:** Frame thumbnail generated via `ffmpeg` (if installed).
 * **PDF Files:** First page rendered via `pdftoppm` (if installed; falls back to a placeholder card otherwise).
