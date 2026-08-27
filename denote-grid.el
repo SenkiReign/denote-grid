@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.4
+;; Version: 0.2.5
 
 ;;; Code:
 
@@ -378,7 +378,24 @@ ROOT can be a directory path string or a list of directory path strings."
     (denote-grid--boxed-raster item out "PDF" counts)))
 
 (defun denote-grid--image-thumb (item counts)
-  (denote-grid--boxed-raster item (denote-grid-item-path item) "IMG" counts))
+  (let ((out (denote-grid-item-path item)))
+    (if (executable-find denote-grid-ffmpeg-executable)
+        (let ((cached (denote-grid--cache-file item "jpg")))
+          (unless (file-exists-p cached)
+            ;; Force yuv420p output so high-res PNG/WEBP/HEIC convert cleanly to JPG
+            (call-process denote-grid-ffmpeg-executable nil nil nil
+                          "-y" "-i" (expand-file-name (denote-grid-item-path item))
+                          "-vf" (format "scale=%d:-1,format=yuv420p"
+                                        (* denote-grid-thumbnail-oversample
+                                           denote-grid-thumbnail-size))
+                          "-loglevel" "error" cached))
+          (when (and (file-exists-p cached)
+                     (> (file-attribute-size (file-attributes cached)) 0))
+            (setq out cached)))
+      ;; Fallback warning if ffmpeg is missing
+      (message "denote-grid: %s not found; using original image source"
+               denote-grid-ffmpeg-executable))
+    (denote-grid--boxed-raster item out "IMG" counts)))
 
 (defun denote-grid--get-image (item counts)
   (unless denote-grid--image-cache
