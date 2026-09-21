@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.5
+;; Version: 0.2.6
 
 ;;; Code:
 
@@ -74,6 +74,18 @@
   "File extensions treated as note text."
   :type '(repeat string) :group 'denote-grid)
 
+(defcustom denote-grid-ignore-regexp "~\\'"
+  "Regexp matching file names that denote-grid skips entirely.
+Matched against the file name without its directory.  The default
+skips Emacs backup files (`foo.org~' and numbered `foo.org.~1~'),
+which would otherwise show up as duplicates of the real note."
+  :type 'regexp :group 'denote-grid)
+
+(defun denote-grid--ignored-file-p (file)
+  "Non-nil if FILE's name matches `denote-grid-ignore-regexp'."
+  (and denote-grid-ignore-regexp
+       (string-match-p denote-grid-ignore-regexp (file-name-nondirectory file))))
+
 (defface denote-grid-title-face
   '((t :inherit bold))
   "Face for the current card's title in the header line.")
@@ -134,7 +146,8 @@
   (let* ((name (file-name-nondirectory path))
          (ext (downcase (or (file-name-extension name) "")))
          (stem (file-name-sans-extension name)))
-    (when (string-match denote-grid--name-re stem)
+    (when (and (not (denote-grid--ignored-file-p path))
+               (string-match denote-grid--name-re stem))
       (let* ((id (match-string 1 stem))
              (title (replace-regexp-in-string "-" " " (match-string 2 stem)))
              (tags (and (match-string 3 stem) (split-string (match-string 3 stem) "_" t)))
