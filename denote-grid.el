@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.6
+;; Version: 0.2.7
 
 ;;; Code:
 
@@ -100,6 +100,45 @@ which would otherwise show up as duplicates of the real note."
   (let ((dir (expand-file-name ".denote-grid-thumbs/" root)))
     (unless (file-directory-p dir) (make-directory dir t))
     dir))
+
+;;; Theme-safe colors
+;;
+;; SVG cannot parse Emacs-only color names (e.g. "gray50"), nor
+;; "unspecified-fg"/"unspecified-bg", and falls back to black.  Every color
+;; that goes into an SVG is therefore resolved to a #rrggbb string here.
+
+(defun denote-grid--hex (color)
+  "Return COLOR as a #rrggbb string, or nil if it cannot be resolved."
+  (when (and (stringp color)
+             (not (string-prefix-p "unspecified" color)))
+    (when-let ((rgb (color-name-to-rgb color)))
+      (apply #'color-rgb-to-hex (append rgb '(2))))))
+
+(defun denote-grid--bg ()
+  "Default background as #rrggbb."
+  (or (denote-grid--hex (face-background 'default nil t))
+      (denote-grid--hex (frame-parameter nil 'background-color))
+      (if (eq (frame-parameter nil 'background-mode) 'dark) "#000000" "#ffffff")))
+
+(defun denote-grid--fg ()
+  "Default foreground as #rrggbb."
+  (or (denote-grid--hex (face-foreground 'default nil t))
+      (denote-grid--hex (frame-parameter nil 'foreground-color))
+      (if (eq (frame-parameter nil 'background-mode) 'dark) "#ffffff" "#000000")))
+
+(defun denote-grid--muted ()
+  "Foreground blended toward background: always readable, always dimmer."
+  (let ((fg (color-name-to-rgb (denote-grid--fg)))
+        (bg (color-name-to-rgb (denote-grid--bg))))
+    (apply #'color-rgb-to-hex
+           (append (cl-mapcar (lambda (f b) (+ b (* 0.65 (- f b)))) fg bg)
+                   '(2)))))
+
+(defun denote-grid--dark-p ()
+  "Non-nil if the default background is dark (perceived luminance < 0.5)."
+  (let ((rgb (color-name-to-rgb (denote-grid--bg))))
+    (< (+ (* 0.299 (nth 0 rgb)) (* 0.587 (nth 1 rgb)) (* 0.114 (nth 2 rgb)))
+       0.5)))
 
 (defconst denote-grid--name-re
   "\\`\\([0-9]\\{8\\}T[0-9]\\{6\\}\\)--\\([^_]+\\)\\(?:__\\(.+\\)\\)?\\'")
@@ -257,6 +296,9 @@ ROOT can be a directory path string or a list of directory path strings."
     counts))
 
 (defun denote-grid--color-for (tags counts)
+  "Return a #rrggbb accent color for TAGS, or nil.
+Lightness is chosen according to the theme so the color stays readable
+on both dark and light backgrounds."
   (when-let ((tag (car-safe tags)))
     (when (>= (gethash tag counts 0) 2)
       (let* ((hash (secure-hash 'sha256 tag))
@@ -265,7 +307,9 @@ ROOT can be a directory path string or a list of directory path strings."
              (h3 (string-to-number (substring hash 6 8) 16))
              (hue (/ (mod (* h1 2654435761) 65536) 65536.0))
              (sat (+ 0.45 (* (/ h2 255.0) 0.50)))
-             (lum (+ 0.40 (* (/ h3 255.0) 0.30)))
+             (lum (if (denote-grid--dark-p)
+                      (+ 0.60 (* (/ h3 255.0) 0.20))
+                    (+ 0.30 (* (/ h3 255.0) 0.25))))
              (rgb (color-hsl-to-rgb hue sat lum)))
         (apply #'color-rgb-to-hex (append rgb '(2)))))))
 
@@ -283,9 +327,9 @@ ROOT can be a directory path string or a list of directory path strings."
 
 (defun denote-grid--note-svg (item counts)
   (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
-         (bg (face-background 'default nil t))
-         (fg (face-foreground 'default nil t))
-         (muted (face-foreground 'shadow nil t))
+         (bg (denote-grid--bg))
+         (fg (denote-grid--fg))
+         (muted (denote-grid--muted))
          (color (denote-grid--color-for (denote-grid-item-tags item) counts))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
     (svg-rectangle svg 0 0 w h :fill bg :rx 10)
@@ -305,10 +349,10 @@ ROOT can be a directory path string or a list of directory path strings."
 
 (defun denote-grid--placeholder-svg (item label counts)
   (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
-         (bg (face-background 'default nil t))
-         (fg (face-foreground 'default nil t))
+         (bg (denote-grid--bg))
+         (fg (denote-grid--fg))
          (color (denote-grid--color-for (denote-grid-item-tags item) counts))
-         (accent (or color (face-foreground 'shadow nil t)))
+         (accent (or color (denote-grid--muted)))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
     (svg-rectangle svg 0 0 w h :fill bg :rx 10)
     (svg-rectangle svg 0 0 w h :fill accent :fill-opacity "0.12" :rx 10)
@@ -350,7 +394,7 @@ ROOT can be a directory path string or a list of directory path strings."
                (y (round (/ (- h dh) 2.0)))
                (color (denote-grid--color-for (denote-grid-item-tags item) counts))
                (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink"))
-               (bg (face-background 'default nil t)))
+               (bg (denote-grid--bg)))
           (svg-rectangle svg 0 0 w h :fill bg :rx 10)
           (condition-case nil
               (progn
@@ -602,7 +646,7 @@ ROOT can be a directory path string or a list of directory path strings."
 (defun denote-grid--cache-key (item counts)
   (list (denote-grid-item-id item) (denote-grid-item-mtime item)
         (denote-grid-item-type item) denote-grid-thumbnail-size
-        (face-background 'default nil t)
+        (denote-grid--bg) (denote-grid--fg)
         (denote-grid--color-for (denote-grid-item-tags item) counts)))
 
 (defun denote-grid--render ()
