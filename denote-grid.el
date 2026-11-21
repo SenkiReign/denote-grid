@@ -3,7 +3,7 @@
 ;; Author:  Senki R.
 ;; Keywords: denote, notes, multimedia, moodboard, emacs, org-mode
 ;; Package-Requires: ((emacs "27.1") (denote "1.0"))
-;; Version: 0.2.7
+;; Version: 0.3.0
 
 ;;; Code:
 
@@ -12,6 +12,9 @@
 (require 'dired)
 (require 'color)
 (require 'denote)
+(require 'subr-x)
+(require 'xml)
+(require 'seq)
 
 (defgroup denote-grid nil
   "An are.na-style local grid for denote notes, images, pdfs, and videos."
@@ -28,9 +31,51 @@
   :type 'regexp
   :group 'denote-grid)
 
-(defcustom denote-grid-note-snippet-length 220
+(defcustom denote-grid-note-snippet-length 600
   "How many characters of a note's body to show on its card."
   :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-card-aspect 0.8
+  "Card height as a fraction of `denote-grid-thumbnail-size'."
+  :type 'float
+  :group 'denote-grid)
+
+(defcustom denote-grid-card-radius 2
+  "Corner radius of cards in pixels.  0 gives sharp are.na-like corners."
+  :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-gutter 12
+  "Pixel gap between cards, both horizontally and vertically."
+  :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-max-columns 5
+  "Maximum number of cards per row."
+  :type 'integer
+  :group 'denote-grid)
+
+(defcustom denote-grid-image-fit 'cover
+  "How image, video and PDF thumbnails fill their card.
+`cover' crops to fill the card edge to edge (are.na style).
+`contain' shows the whole picture with padding."
+  :type '(choice (const cover) (const contain))
+  :group 'denote-grid)
+
+(defcustom denote-grid-ffprobe-executable "ffprobe"
+  "ffprobe executable used to read video durations for badges. Optional."
+  :type 'string
+  :group 'denote-grid)
+
+(defcustom denote-grid-pdfinfo-executable "pdfinfo"
+  "pdfinfo executable used to read PDF page counts for badges. Optional."
+  :type 'string
+  :group 'denote-grid)
+
+(defcustom denote-grid-note-font-family "sans-serif"
+  "Font family used for text inside note cards."
+  :type 'string
   :group 'denote-grid)
 
 (defcustom denote-grid-thumbnail-oversample 1
@@ -94,7 +139,25 @@ which would otherwise show up as duplicates of the real note."
   '((t :inherit shadow))
   "Face for tags in the header line.")
 
+(defface denote-grid-selection-face
+  '((((background dark)) :foreground "#8a9bff")
+    (t :foreground "#3b4cc0"))
+  "Face whose foreground is the border color of the selected card.")
+
+(defface denote-grid-chip-face
+  '((t :inherit denote-grid-tag-face :underline t))
+  "Face for clickable tag chips in the header line.")
+
 (defvar denote-grid--cache-dir nil)
+
+(defvar-local denote-grid--selected-start nil
+  "Buffer position of the card currently drawn as selected.")
+(defvar-local denote-grid--counts nil
+  "Tag counts of the currently rendered items.")
+(defvar-local denote-grid--link-counts nil
+  "Hash table: item id -> number of denote links to/from that item.")
+(defvar-local denote-grid--links-cache nil)
+(defvar-local denote-grid--links-cache-key nil)
 
 (defun denote-grid--cache-dir-for (root)
   (let ((dir (expand-file-name ".denote-grid-thumbs/" root)))
@@ -156,17 +219,51 @@ which would otherwise show up as duplicates of the real note."
    ((member ext denote-grid-text-extensions) 'text)
    (t 'other)))
 
+(defun denote-grid--clean-line (line)
+  "Turn an org/markdown LINE into plain display text.
+Headings are prefixed with a ^A marker so the card can draw them bold."
+  (let ((s line) (heading nil))
+    (cond ((string-match "\\`\\*+[ \t]+" s)
+           (setq heading t s (substring s (match-end 0))))
+          ((string-match "\\`#+[ \t]+" s)
+           (setq heading t s (substring s (match-end 0)))))
+    (setq s (replace-regexp-in-string "\\[\\[denote:[^]]*\\]\\]" "" s))
+    (setq s (replace-regexp-in-string "\\[\\[[^]]*\\]\\[\\([^]]*\\)\\]\\]" "\\1" s))
+    (setq s (replace-regexp-in-string "\\[\\[\\([^]]*\\)\\]\\]" "\\1" s))
+    (setq s (replace-regexp-in-string "\\[\\([^]]+\\)\\]([^)]*)" "\\1" s))
+    (setq s (replace-regexp-in-string "\\`\\([ \t]*\\)[-+] \\[ \\]" "\\1☐" s))
+    (setq s (replace-regexp-in-string "\\`\\([ \t]*\\)[-+] \\[[xX]\\]" "\\1☑" s))
+    (setq s (replace-regexp-in-string "\\`\\([ \t]*\\)[-+] " "\\1• " s))
+    (setq s (replace-regexp-in-string "\\*\\([^* \t\n][^*\n]*?\\)\\*" "\\1" s))
+    (setq s (replace-regexp-in-string "=\\([^= \t\n][^=\n]*?\\)=" "\\1" s))
+    (setq s (replace-regexp-in-string "~\\([^~ \t\n][^~\n]*?\\)~" "\\1" s))
+    (if heading (concat (string 1) s) s)))
+
 (defun denote-grid--snippet (path)
+  "Return a cleaned plain-text excerpt of the note at PATH."
   (condition-case nil
       (with-temp-buffer
-        (insert-file-contents path nil 0 4000)
+        (insert-file-contents path nil 0 6000)
         (goto-char (point-min))
-        (let (lines)
+        ;; YAML / TOML front matter block
+        (when (looking-at "\\(---\\|\\+\\+\\+\\)[ \t]*\n")
+          (let ((delim (match-string 1)))
+            (goto-char (match-end 0))
+            (if (re-search-forward (concat "^" (regexp-quote delim) "[ \t]*$") nil t)
+                (forward-line 1)
+              (goto-char (point-min)))))
+        (let (lines (in-drawer nil))
           (while (not (eobp))
             (let ((line (buffer-substring-no-properties
                          (line-beginning-position) (line-end-position))))
-              (unless (string-match-p denote-grid-front-matter-regexp line)
-                (push line lines)))
+              (cond
+               (in-drawer
+                (when (string-match-p "\\`[ \t]*:END:[ \t]*\\'" line)
+                  (setq in-drawer nil)))
+               ((string-match-p "\\`[ \t]*:\\(PROPERTIES\\|LOGBOOK\\):[ \t]*\\'" line)
+                (setq in-drawer t))
+               ((string-match-p denote-grid-front-matter-regexp line))
+               (t (push (denote-grid--clean-line line) lines))))
             (forward-line 1))
           (let ((body (string-trim (mapconcat #'identity (nreverse lines) "\n"))))
             (substring body 0 (min (length body) denote-grid-note-snippet-length)))))
@@ -288,6 +385,25 @@ ROOT can be a directory path string or a list of directory path strings."
           (puthash id n cluster-of)))
       cluster-of)))
 
+(defun denote-grid--links-cached (items)
+  "Link table for ITEMS, recomputed only when the set of items changes."
+  (let ((key (mapcar #'denote-grid-item-id items)))
+    (unless (equal key denote-grid--links-cache-key)
+      (setq denote-grid--links-cache (denote-grid--links items)
+            denote-grid--links-cache-key key))
+    denote-grid--links-cache))
+
+(defun denote-grid--build-link-counts ()
+  (let ((h (make-hash-table :test 'equal)))
+    (maphash (lambda (k v) (puthash k (length v) h))
+             (denote-grid--links-cached denote-grid--items))
+    h))
+
+(defun denote-grid--link-count (item)
+  (if (hash-table-p denote-grid--link-counts)
+      (gethash (denote-grid-item-id item) denote-grid--link-counts 0)
+    0))
+
 (defun denote-grid--tag-counts (items)
   (let ((counts (make-hash-table :test 'equal)))
     (dolist (it items)
@@ -313,50 +429,115 @@ on both dark and light backgrounds."
              (rgb (color-hsl-to-rgb hue sat lum)))
         (apply #'color-rgb-to-hex (append rgb '(2)))))))
 
+;;; Card drawing
+
+(defun denote-grid--card-height ()
+  (round (* denote-grid-thumbnail-size denote-grid-card-aspect)))
+
+(defun denote-grid--mix (from to amount)
+  "Blend color FROM toward TO by AMOUNT (0..1), as #rrggbb."
+  (apply #'color-rgb-to-hex
+         (append (cl-mapcar (lambda (a b) (+ a (* amount (- b a))))
+                            (color-name-to-rgb from) (color-name-to-rgb to))
+                 '(2))))
+
 (defun denote-grid--wrap-text (str width)
-  (let ((words (split-string str))
-        (lines nil) (cur ""))
-    (dolist (w words)
-      (if (< (length cur) 1)
-          (setq cur w)
-        (if (<= (+ (length cur) 1 (length w)) width)
-            (setq cur (concat cur " " w))
-          (push cur lines) (setq cur w))))
-    (when (> (length cur) 0) (push cur lines))
+  "Wrap STR to WIDTH chars, keeping paragraph breaks as empty strings.
+Lines of heading paragraphs carry the text property `denote-grid-bold'."
+  (let (lines)
+    (dolist (raw (split-string str "\n"))
+      (let* ((bold (string-prefix-p (string 1) raw))
+             (para (if bold (substring raw 1) raw)))
+        (if (string-blank-p para)
+            (unless (or (null lines) (equal (car lines) ""))
+              (push "" lines))
+          (let ((cur "")
+                (emit (lambda (l)
+                        (push (if bold (propertize l 'denote-grid-bold t) l) lines))))
+            (dolist (w (split-string para))
+              (cond ((string-empty-p cur) (setq cur w))
+                    ((<= (+ (length cur) 1 (length w)) width)
+                     (setq cur (concat cur " " w)))
+                    (t (funcall emit cur) (setq cur w))))
+            (unless (string-empty-p cur) (funcall emit cur))))))
     (nreverse lines)))
 
 (defun denote-grid--note-svg (item counts)
-  (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
+  "Are.na style text block: bordered box, body first, title as caption."
+  (let* ((w denote-grid-thumbnail-size) (h (denote-grid--card-height))
          (bg (denote-grid--bg))
          (fg (denote-grid--fg))
          (muted (denote-grid--muted))
+         (surface (denote-grid--mix bg fg 0.05))
+         (border (denote-grid--mix bg fg 0.28))
          (color (denote-grid--color-for (denote-grid-item-tags item) counts))
+         (font denote-grid-note-font-family)
+         (pad 14) (fs 12) (lh 17) (footer 30)
+         (chars (floor (- w (* 2 pad)) (* fs 0.56)))
+         (body (denote-grid--get-snippet item))
+         (empty (string-empty-p (string-trim body)))
+         (title (denote-grid-item-title item))
+         (nl (denote-grid--link-count item))
+         (badge (and (> nl 0) (format "%d link%s" nl (if (= nl 1) "" "s"))))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
-    (svg-rectangle svg 0 0 w h :fill bg :rx 10)
-    (when color (svg-rectangle svg 0 0 6 h :fill color :rx 3))
-    (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 24 nil nil "…")
-              :x 16 :y 26 :fill fg :font-size 15 :font-weight "bold" :font-family "sans-serif")
-    (let ((y 48))
-      (dolist (line (denote-grid--wrap-text (denote-grid--get-snippet item) 32))
-        (when (< y (- h 22))
-          (svg-text svg line :x 16 :y y :fill muted :font-size 11 :font-family "sans-serif")
-          (setq y (+ y 15)))))
-    (when color
-      (let ((tagstr (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags item) "  ")))
-        (svg-text svg (truncate-string-to-width tagstr 36 nil nil "…")
-                  :x 16 :y (- h 12) :fill color :font-size 10 :font-family "sans-serif")))
+    (svg-rectangle svg 0 0 w h :fill surface :rx denote-grid-card-radius)
+    (svg-rectangle svg 0.5 0.5 (1- w) (1- h) :fill "none" :stroke-color border
+                   :stroke-width 1 :rx denote-grid-card-radius)
+    (when color (svg-rectangle svg 0 0 w 3 :fill color))
+    (if empty
+        (let ((y (+ pad 8)))
+          (dolist (line (seq-take (denote-grid--wrap-text title (floor (- w (* 2 pad)) 8.4)) 4))
+            (svg-text svg line :x pad :y (+ y 6) :fill fg :font-size 15
+                      :font-weight "bold" :font-family font)
+            (setq y (+ y 22))))
+      (let* ((max-lines (floor (- h footer pad) lh))
+             (all (denote-grid--wrap-text body chars))
+             (shown (seq-take all max-lines))
+             (cut (> (length all) max-lines))
+             (n (length shown))
+             (y (+ pad fs -2))
+             (i 0))
+        (dolist (line shown)
+          (if (string-empty-p line)
+              (setq y (- y (/ lh 2)))
+            (let ((bold (get-text-property 0 'denote-grid-bold line))
+                  (txt (if (and cut (= i (1- n)))
+                           (concat (string-trim-right line) "…")
+                         line))
+                  (op (cond ((and cut (= i (1- n))) "0.3")
+                            ((and cut (= i (- n 2))) "0.65")
+                            (t "1"))))
+              (apply #'svg-text svg txt :x pad :y y :fill fg :fill-opacity op
+                     :font-size fs :font-family font
+                     (and bold '(:font-weight "bold")))))
+          (setq y (+ y lh) i (1+ i)))))
+    ;; footer: hairline, title caption, link badge
+    (svg-rectangle svg 0 (- h footer) w 1 :fill border)
+    (let ((tx pad) (base (+ (- h (/ footer 2)) 4)))
+      (when color
+        (svg-circle svg (+ pad 3) (- h (/ footer 2)) 3 :fill color)
+        (setq tx (+ pad 12)))
+      (when badge
+        (svg-text svg badge :x (- w pad) :y base :fill muted :font-size 10
+                  :text-anchor "end" :font-family font))
+      (svg-text svg (truncate-string-to-width
+                     title
+                     (floor (- w tx pad (if badge (+ 8 (* (length badge) 5.8)) 0))
+                            (* 10.5 0.56))
+                     nil nil "…")
+                :x tx :y base :fill muted :font-size 10.5 :font-family font))
     (svg-image svg :ascent 'center)))
 
 (defun denote-grid--placeholder-svg (item label counts)
-  (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
+  (let* ((w denote-grid-thumbnail-size) (h (denote-grid--card-height))
          (bg (denote-grid--bg))
          (fg (denote-grid--fg))
          (color (denote-grid--color-for (denote-grid-item-tags item) counts))
          (accent (or color (denote-grid--muted)))
          (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink")))
-    (svg-rectangle svg 0 0 w h :fill bg :rx 10)
-    (svg-rectangle svg 0 0 w h :fill accent :fill-opacity "0.12" :rx 10)
-    (when color (svg-rectangle svg 0 0 6 h :fill color :rx 3))
+    (svg-rectangle svg 0 0 w h :fill bg :rx denote-grid-card-radius)
+    (svg-rectangle svg 0 0 w h :fill accent :fill-opacity "0.12" :rx denote-grid-card-radius)
+    (when color (svg-rectangle svg 0 0 w 3 :fill color))
     (svg-text svg label :x (/ w 2) :y (/ h 2) :fill accent :font-size 22
               :font-weight "bold" :font-family "sans-serif" :text-anchor "middle")
     (svg-text svg (truncate-string-to-width (denote-grid-item-title item) 26 nil nil "…")
@@ -378,15 +559,67 @@ on both dark and light backgrounds."
     ("bmp" "image/bmp")
     (_ "image/png")))
 
-(defun denote-grid--boxed-raster (item raw-file label counts)
+(defun denote-grid--cached-probe (item ext fn)
+  "Return the string cached for ITEM under EXT, computing it with FN once."
+  (let ((f (denote-grid--cache-file item ext)))
+    (if (file-exists-p f)
+        (let ((v (string-trim (with-temp-buffer (insert-file-contents f) (buffer-string)))))
+          (and (not (string-empty-p v)) v))
+      (let ((v (ignore-errors (funcall fn))))
+        (ignore-errors (with-temp-file f (insert (or v ""))))
+        v))))
+
+(defun denote-grid--format-duration (secs)
+  (let* ((s (round secs)) (h (/ s 3600)) (m (/ (mod s 3600) 60)) (r (mod s 60)))
+    (if (> h 0) (format "%d:%02d:%02d" h m r) (format "%d:%02d" m r))))
+
+(defun denote-grid--video-duration (item)
+  (when (executable-find denote-grid-ffprobe-executable)
+    (denote-grid--cached-probe
+     item "dur"
+     (lambda ()
+       (with-temp-buffer
+         (when (zerop (call-process denote-grid-ffprobe-executable nil t nil
+                                    "-v" "error" "-show_entries" "format=duration"
+                                    "-of" "csv=p=0" (denote-grid-item-path item)))
+           (let ((d (string-to-number (buffer-string))))
+             (and (> d 0) (denote-grid--format-duration d)))))))))
+
+(defun denote-grid--pdf-pages (item)
+  (when (executable-find denote-grid-pdfinfo-executable)
+    (denote-grid--cached-probe
+     item "pages"
+     (lambda ()
+       (with-temp-buffer
+         (call-process denote-grid-pdfinfo-executable nil t nil (denote-grid-item-path item))
+         (goto-char (point-min))
+         (when (re-search-forward "^Pages:[ \t]+\\([0-9]+\\)" nil t)
+           (format "%s p" (match-string 1))))))))
+
+(defun denote-grid--draw-badge (svg w text play)
+  "Draw a small dark pill with TEXT (and a play triangle if PLAY) at the top right."
+  (let* ((text (or text ""))
+         (tw (+ 12 (* (length text) 6.4) (if play 10 0)))
+         (x (- w tw 8)) (y 8))
+    (svg-rectangle svg x y tw 18 :fill "#000000" :fill-opacity "0.65" :rx 3)
+    (when play
+      (svg-polygon svg (list (cons (+ x 7) (+ y 5)) (cons (+ x 7) (+ y 13))
+                             (cons (+ x 14) (+ y 9)))
+                   :fill "#ffffff"))
+    (unless (string-empty-p text)
+      (svg-text svg text :x (+ x (if play 18 6)) :y (+ y 13) :fill "#ffffff"
+                :font-size 10 :font-family "sans-serif"))))
+
+(defun denote-grid--boxed-raster (item raw-file label counts &optional badge-text play)
   (if (null raw-file)
       (denote-grid--placeholder-svg item label counts)
-    (let* ((w denote-grid-thumbnail-size) (h (round (* w 0.72)))
+    (let* ((w denote-grid-thumbnail-size) (h (denote-grid--card-height))
            (dim (ignore-errors (image-size (create-image raw-file nil nil) t))))
       (if (not dim)
           (denote-grid--placeholder-svg item label counts)
         (let* ((iw (car dim)) (ih (cdr dim))
-               (pad 6)
+               (cover (eq denote-grid-image-fit 'cover))
+               (pad (if cover 0 6))
                (scale (min (/ (float (- w (* 2 pad))) iw) (/ (float (- h (* 2 pad))) ih)))
                (dw (max 1 (round (* iw scale))))
                (dh (max 1 (round (* ih scale))))
@@ -395,12 +628,18 @@ on both dark and light backgrounds."
                (color (denote-grid--color-for (denote-grid-item-tags item) counts))
                (svg (svg-create w h :xmlns:xlink "http://www.w3.org/1999/xlink"))
                (bg (denote-grid--bg)))
-          (svg-rectangle svg 0 0 w h :fill bg :rx 10)
+          (svg-rectangle svg 0 0 w h :fill bg :rx denote-grid-card-radius)
           (condition-case nil
               (progn
-                (svg-embed svg raw-file (denote-grid--mime-for raw-file) nil
-                           :x x :y y :width dw :height dh)
-                (when color (svg-rectangle svg 0 0 6 h :fill color :rx 3))
+                (if cover
+                    (svg-embed svg raw-file (denote-grid--mime-for raw-file) nil
+                               :x 0 :y 0 :width w :height h
+                               :preserveAspectRatio "xMidYMid slice")
+                  (svg-embed svg raw-file (denote-grid--mime-for raw-file) nil
+                             :x x :y y :width dw :height dh))
+                (when color (svg-rectangle svg 0 0 w 3 :fill color))
+                (when (or badge-text play)
+                  (denote-grid--draw-badge svg w badge-text play))
                 (svg-image svg :ascent 'center))
             (error (denote-grid--placeholder-svg item label counts))))))))
 
@@ -418,7 +657,8 @@ on both dark and light backgrounds."
                                                     denote-grid-thumbnail-size))
                       "-loglevel" "quiet" out))
       (unless (file-exists-p out) (setq out nil)))
-    (denote-grid--boxed-raster item out "VIDEO" counts)))
+    (denote-grid--boxed-raster item out "VIDEO" counts
+                               (and out (denote-grid--video-duration item)) t)))
 
 (defun denote-grid--pdf-thumb (item counts)
   (let ((out nil))
@@ -432,7 +672,8 @@ on both dark and light backgrounds."
                                                          denote-grid-thumbnail-size))
                         (denote-grid-item-path item) base))
         (when (file-exists-p png) (setq out png))))
-    (denote-grid--boxed-raster item out "PDF" counts)))
+    (denote-grid--boxed-raster item out "PDF" counts
+                               (and out (denote-grid--pdf-pages item)))))
 
 (defun denote-grid--image-thumb (item counts)
   (let ((out (denote-grid-item-path item)))
@@ -491,7 +732,6 @@ on both dark and light backgrounds."
 (defvar-local denote-grid--card-starts nil)
 (defvar-local denote-grid--source-directory nil)
 (defvar-local denote-grid--source-dired-buffer nil)
-(defvar-local denote-grid--selection-overlay nil)
 (defvar-local denote-grid--last-win-width nil)
 (defvar-local denote-grid--clusters-cache nil)
 (defvar-local denote-grid--clusters-cache-key nil)
@@ -507,6 +747,7 @@ on both dark and light backgrounds."
     (define-key m (kbd "s") #'denote-grid-sort-cycle)
     (define-key m (kbd "r") #'denote-grid-sort-reverse)
     (define-key m (kbd "c") #'denote-grid-toggle-cluster)
+    (define-key m (kbd "t") #'denote-grid-filter-tag)
     (define-key m (kbd "o") #'denote-grid-toggle-orphan)
     (define-key m (kbd "g") #'denote-grid-refresh)
     (define-key m (kbd "q") #'quit-window)
@@ -523,6 +764,7 @@ on both dark and light backgrounds."
 (define-derived-mode denote-grid-mode special-mode "Denote-Grid"
   "Major mode for browsing denote files as an image-dired style grid."
   (setq truncate-lines t)
+  (setq-local line-spacing denote-grid-gutter)
   (setq header-line-format '(:eval (denote-grid--header-line)))
   (add-hook 'post-command-hook #'denote-grid--update-point-info nil t)
   (add-hook 'window-size-change-functions #'denote-grid--on-window-size-change nil t)
@@ -539,42 +781,135 @@ on both dark and light backgrounds."
         denote-grid--pending-fill nil
         denote-grid--fill-timer nil))
 
+(defun denote-grid--chip (label filter help)
+  "Clickable header-line LABEL that sets the grid filter to FILTER."
+  (propertize (replace-regexp-in-string "%" "%%" label)
+              'face 'denote-grid-chip-face
+              'mouse-face 'highlight
+              'help-echo help
+              'denote-grid-filter filter
+              'local-map (let ((m (make-sparse-keymap)))
+                           (define-key m [header-line mouse-1] #'denote-grid-header-click)
+                           m)))
+
+(defun denote-grid-header-click (event)
+  "Apply the filter stored on the header-line chip that was clicked."
+  (interactive "e")
+  (let* ((start (event-start event))
+         (ps (posn-string start))
+         (filter (and ps (get-text-property (cdr ps) 'denote-grid-filter (car ps)))))
+    (when filter
+      (with-current-buffer (window-buffer (posn-window start))
+        (setq denote-grid--filter filter)
+        (denote-grid--render)))))
+
 (defun denote-grid--header-line ()
-  (if denote-grid--current-item
-      (let ((it denote-grid--current-item))
-        (format " %s  %s  %s"
-                (propertize (denote-grid-item-title it) 'face 'denote-grid-title-face)
-                (propertize (substring (denote-grid-item-id it) 0 8) 'face 'shadow)
-                (propertize (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")
-                            'face 'denote-grid-tag-face)))
-    (format " %d items  sort:%s%s  filter:%s%s%s"
-            (length denote-grid--items) denote-grid--sort-key
-            (if denote-grid--sort-desc "↓" "↑")
-            (if (string-empty-p denote-grid--filter) "(none)" denote-grid--filter)
-            (if denote-grid--cluster-p "  [clustered]" "")
-            (if denote-grid--orphan-p "  [orphans]" ""))))
+  (let ((clear (if (string-empty-p denote-grid--filter)
+                   ""
+                 (concat "  " (denote-grid--chip "✕ clear filter" "" "Clear the filter")))))
+    (if denote-grid--current-item
+        (let ((it denote-grid--current-item))
+          (concat
+           (format " %s  %s  "
+                   (propertize (replace-regexp-in-string "%" "%%" (denote-grid-item-title it))
+                               'face 'denote-grid-title-face)
+                   (propertize (substring (denote-grid-item-id it) 0 8) 'face 'shadow))
+           (mapconcat (lambda (tg)
+                        (denote-grid--chip (concat "#" tg) (concat "#" tg)
+                                           (format "Show only #%s" tg)))
+                      (denote-grid-item-tags it) " ")
+           clear))
+      (concat
+       (format " %d items  sort:%s%s  filter:%s%s%s"
+               (length denote-grid--items) denote-grid--sort-key
+               (if denote-grid--sort-desc "↓" "↑")
+               (replace-regexp-in-string
+                "%" "%%" (if (string-empty-p denote-grid--filter) "(none)" denote-grid--filter))
+               (if denote-grid--cluster-p "  [clustered]" "")
+               (if denote-grid--orphan-p "  [orphans]" ""))
+       clear))))
+
+(defun denote-grid--selection-color ()
+  (or (denote-grid--hex (face-attribute 'denote-grid-selection-face :foreground nil t))
+      (denote-grid--fg)))
+
+(defun denote-grid--select-decorate (img item)
+  "Return a copy of IMG with a selection border (and a title caption for media)."
+  (let ((data (and (eq (car-safe img) 'image) (plist-get (cdr img) :data))))
+    (if (not (stringp data))
+        img
+      (let* ((w denote-grid-thumbnail-size) (h (denote-grid--card-height))
+             (col (denote-grid--selection-color))
+             (caption
+              (unless (eq (denote-grid-item-type item) 'text)
+                (format "<rect x=\"0\" y=\"%d\" width=\"%d\" height=\"26\" fill=\"%s\" fill-opacity=\"0.85\"/><text x=\"10\" y=\"%d\" font-family=\"sans-serif\" font-size=\"11\" fill=\"%s\">%s</text>"
+                        (- h 26) w (denote-grid--bg) (- h 9) (denote-grid--fg)
+                        (xml-escape-string
+                         (truncate-string-to-width (denote-grid-item-title item)
+                                                   (floor (- w 20) 6.2) nil nil "…")))))
+             (rect (format "<rect x=\"1.5\" y=\"1.5\" width=\"%d\" height=\"%d\" fill=\"none\" stroke=\"%s\" stroke-width=\"3\" rx=\"%d\"/>"
+                           (- w 3) (- h 3) col denote-grid-card-radius))
+             (pos (string-match "</svg>[ \t\n]*\\'" data)))
+        (if (not pos)
+            img
+          (let ((new (copy-sequence img)))
+            (setcdr new (plist-put (copy-sequence (cdr img)) :data
+                                   (concat (substring data 0 pos) (or caption "") rect
+                                           (substring data pos))))
+            new))))))
+
+(defun denote-grid--cached-image (item counts)
+  (and (hash-table-p denote-grid--image-cache)
+       (gethash (denote-grid--cache-key item counts) denote-grid--image-cache)))
+
+(defun denote-grid--display-image (item counts)
+  "Image to show for ITEM now: cached, a placeholder if deferred, or freshly made."
+  (or (denote-grid--cached-image item counts)
+      (if (denote-grid--raster-p item)
+          (denote-grid--placeholder-svg
+           item (pcase (denote-grid-item-type item)
+                  ('image "IMG") ('video "VIDEO") ('pdf "PDF") (_ "FILE"))
+           counts)
+        (denote-grid--get-image item counts))))
+
+(defun denote-grid--refresh-card (start selected)
+  "Redraw the card at START, with the selection border if SELECTED."
+  (when-let ((item (get-text-property start 'denote-grid-item)))
+    (let* ((img (denote-grid--display-image item denote-grid--counts))
+           (img (if selected (denote-grid--select-decorate img item) img)))
+      ;; `insert-image' puts the title text under the image, so a card spans
+      ;; several characters: recolor the whole run, not just the first one.
+      (with-silent-modifications
+        (put-text-property
+         start (next-single-property-change start 'denote-grid-item nil (point-max))
+         'display img)))))
 
 (defun denote-grid--update-point-info ()
   (setq denote-grid--current-item (get-text-property (point) 'denote-grid-item))
-  (when (and (derived-mode-p 'denote-grid-mode) denote-grid--card-starts)
-    (unless (overlayp denote-grid--selection-overlay)
-      (setq denote-grid--selection-overlay (make-overlay (point-min) (point-min)))
-      (overlay-put denote-grid--selection-overlay 'face '(:box (:line-width 2 :color "#5b6ee1"))))
-    (let ((idx (denote-grid--card-index-at (point))))
-      (if (>= idx 0)
-          (let ((start (aref denote-grid--card-starts idx)))
-            (move-overlay denote-grid--selection-overlay start (1+ start)))
-        (delete-overlay denote-grid--selection-overlay))))
+  (when (and (derived-mode-p 'denote-grid-mode)
+             denote-grid--card-starts
+             (> (length denote-grid--card-starts) 0))
+    (let* ((idx (denote-grid--card-index-at (point)))
+           (start (and (>= idx 0) (aref denote-grid--card-starts idx))))
+      (unless (eql start denote-grid--selected-start)
+        (when denote-grid--selected-start
+          (denote-grid--refresh-card denote-grid--selected-start nil))
+        (setq denote-grid--selected-start start)
+        (when start (denote-grid--refresh-card start t)))))
   (force-mode-line-update))
 
 (defun denote-grid--cards-per-row ()
-  "Calculate how many cards fit on a line, capped at 5 max."
+  "How many cards (plus gutters) fit on a line."
   (if-let* ((win (get-buffer-window (current-buffer)))
-            (win-width (window-body-width win t))
-            (space-width (frame-char-width))
-            (card-width (+ denote-grid-thumbnail-size (* space-width 2))))
-      (min 5 (max 1 (floor win-width card-width)))
+            (win-width (window-body-width win t)))
+      (min denote-grid-max-columns
+           (max 1 (floor (- win-width (frame-char-width))
+                         (+ denote-grid-thumbnail-size denote-grid-gutter))))
     1))
+
+(defun denote-grid--gap ()
+  "A horizontal gutter of `denote-grid-gutter' pixels."
+  (propertize " " 'display `(space :width (,denote-grid-gutter))))
 
 (defun denote-grid--on-window-size-change (win)
   (when (and (eq (window-buffer win) (current-buffer))
@@ -619,7 +954,7 @@ on both dark and light backgrounds."
                           (let ((va (denote-grid--sort-value a denote-grid--sort-key))
                                 (vb (denote-grid--sort-value b denote-grid--sort-key)))
                             (if denote-grid--sort-desc (string> va vb) (string< va vb))))))
-         (links (denote-grid--links sorted)))
+         (links (denote-grid--links-cached denote-grid--items)))
     (cond
      (denote-grid--cluster-p
       (let* ((clusters (denote-grid--clusters-cached sorted))
@@ -647,13 +982,17 @@ on both dark and light backgrounds."
   (list (denote-grid-item-id item) (denote-grid-item-mtime item)
         (denote-grid-item-type item) denote-grid-thumbnail-size
         (denote-grid--bg) (denote-grid--fg)
-        (denote-grid--color-for (denote-grid-item-tags item) counts)))
+        (denote-grid--color-for (denote-grid-item-tags item) counts)
+        denote-grid-card-aspect denote-grid-card-radius denote-grid-image-fit
+        (and (eq (denote-grid-item-type item) 'text) (denote-grid--link-count item))))
 
 (defun denote-grid--render ()
-  "Render grid using hard line breaks like `image-dired'."
+  "Render the grid with hard line breaks and pixel gutters."
   (when (timerp denote-grid--fill-timer)
     (cancel-timer denote-grid--fill-timer)
     (setq denote-grid--fill-timer nil))
+  (setq denote-grid--selected-start nil)
+  (setq denote-grid--link-counts (denote-grid--build-link-counts))
   (let ((inhibit-read-only t)
         (pos (point))
         (clusters (and denote-grid--cluster-p (denote-grid--clusters-cached denote-grid--items)))
@@ -666,6 +1005,7 @@ on both dark and light backgrounds."
     (let* ((items (denote-grid--visible-items))
            (counts (denote-grid--tag-counts items))
            (last-cluster nil))
+      (setq denote-grid--counts counts)
       (if (null items)
           (insert (propertize "\n  (no items match)\n" 'face 'shadow))
         (dolist (it items)
@@ -676,16 +1016,11 @@ on both dark and light backgrounds."
                 (insert (propertize (format "·· cluster %d ··\n" c) 'face 'shadow))
                 (setq last-cluster c)
                 (setq count 0))))
-          (let* ((cached (and (hash-table-p denote-grid--image-cache)
-                              (gethash (denote-grid--cache-key it counts) denote-grid--image-cache)))
-                 (deferred (and (not cached) (denote-grid--raster-p it)))
-                 (img (or cached
-                          (if deferred
-                              (denote-grid--placeholder-svg
-                               it (pcase (denote-grid-item-type it)
-                                    ('image "IMG") ('video "VIDEO") ('pdf "PDF") (_ "FILE"))
-                               counts)
-                            (denote-grid--get-image it counts))))
+          (when (= (mod count cols) 0)
+            (insert (denote-grid--gap)))
+          (let* ((deferred (and (denote-grid--raster-p it)
+                                (not (denote-grid--cached-image it counts))))
+                 (img (denote-grid--display-image it counts))
                  (start (point)))
             (push start starts)
             (insert-image img (denote-grid-item-title it))
@@ -696,11 +1031,12 @@ on both dark and light backgrounds."
                                (format "%s\n%s\n%s"
                                        (denote-grid-item-title it)
                                        (denote-grid-item-id it)
-                                       (mapconcat (lambda (tg) (concat "#" tg)) (denote-grid-item-tags it) " ")))
+                                       (mapconcat (lambda (tg) (concat "#" tg))
+                                                  (denote-grid-item-tags it) " ")))
             (setq count (1+ count))
             (if (= (mod count cols) 0)
                 (insert "\n")
-              (insert " "))))))
+              (insert (denote-grid--gap)))))))
     (setq denote-grid--card-starts (vconcat (nreverse starts)))
     (setq denote-grid--pending-fill (nreverse pending))
     (goto-char (min pos (point-max))))
@@ -711,8 +1047,10 @@ on both dark and light backgrounds."
 (defun denote-grid--apply-thumbnail (card)
   (pcase-let ((`(,start ,end ,item ,counts) card))
     (when (<= end (point-max))
-      (let ((inhibit-read-only t)
-            (img (denote-grid--get-image item counts)))
+      (let* ((inhibit-read-only t)
+             (img (denote-grid--get-image item counts)))
+        (when (eql start denote-grid--selected-start)
+          (setq img (denote-grid--select-decorate img item)))
         (put-text-property start end 'display img)))))
 
 (defun denote-grid--fill-visible ()
@@ -865,6 +1203,16 @@ entry if `denote-directory` is a list)."
   (setq denote-grid--filter query)
   (denote-grid--render))
 
+(defun denote-grid-filter-tag ()
+  "Filter the grid by a tag chosen with completion (empty input clears)."
+  (interactive)
+  (let* ((tags (sort (delete-dups
+                      (apply #'append (mapcar #'denote-grid-item-tags denote-grid--items)))
+                     #'string<))
+         (tag (completing-read "Filter by tag (empty to clear): " tags nil t)))
+    (setq denote-grid--filter (if (string-empty-p tag) "" (concat "#" tag)))
+    (denote-grid--render)))
+
 (defun denote-grid-sort-cycle ()
   "Cycle through sorting keys (date -> title -> tags -> type)."
   (interactive)
@@ -892,6 +1240,8 @@ entry if `denote-directory` is a list)."
               (with-current-buffer denote-grid--source-dired-buffer
                 (denote-grid--collect-items-from-dired))
             (denote-grid--collect-items denote-grid--source-directory)))
+    (setq denote-grid--links-cache-key nil
+          denote-grid--clusters-cache-key nil)
     (denote-grid--prune-image-cache denote-grid--items)
     (denote-grid--render)))
 
