@@ -50,5 +50,6 @@ When in the `*denote-grid*` buffer:
 | `/` | Filter items (supports plain text substring, `#tag`, or `#tag1 tag2`) |
 | `s` | Cycle sort key (`date` → `title` → `tags` → `type`) |
 | `r` | Reverse sort order |
+| `t` | tag selection for quick filtering |
 | `g` | Refresh (rescans files while maintaining current filter and sort) |
 | `q` | Quit window |
