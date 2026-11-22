@@ -56,7 +56,7 @@
   :type 'integer
   :group 'denote-grid)
 
-(defcustom denote-grid-image-fit 'cover
+(defcustom denote-grid-image-fit 'contain
   "How image, video and PDF thumbnails fill their card.
 `cover' crops to fill the card edge to edge (are.na style).
 `contain' shows the whole picture with padding."
