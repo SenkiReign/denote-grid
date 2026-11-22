@@ -21,7 +21,7 @@
   :group 'convenience
   :prefix "denote-grid-")
 
-(defcustom denote-grid-thumbnail-size 220
+(defcustom denote-grid-thumbnail-size 400
   "Max width/height in pixels for grid thumbnails."
   :type 'integer
   :group 'denote-grid)
@@ -73,7 +73,7 @@
   :type 'string
   :group 'denote-grid)
 
-(defcustom denote-grid-note-font-size 12
+(defcustom denote-grid-note-font-size 14
   "Font size in pixels for text inside note cards.  Line height follows it."
   :type 'integer
   :group 'denote-grid)
