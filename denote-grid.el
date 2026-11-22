@@ -17,7 +17,7 @@
 (require 'seq)
 
 (defgroup denote-grid nil
-  "A digital garden style local grid for denote notes, images, pdfs, and videos."
+  "An are.na-style local grid for denote notes, images, pdfs, and videos."
   :group 'convenience
   :prefix "denote-grid-")
 
@@ -42,7 +42,7 @@
   :group 'denote-grid)
 
 (defcustom denote-grid-card-radius 2
-  "Corner radius of cards in pixels.  0 gives sharp corners."
+  "Corner radius of cards in pixels.  0 gives sharp are.na-like corners."
   :type 'integer
   :group 'denote-grid)
 
@@ -58,7 +58,7 @@
 
 (defcustom denote-grid-image-fit 'cover
   "How image, video and PDF thumbnails fill their card.
-`cover' crops to fill the card edge to edge.
+`cover' crops to fill the card edge to edge (are.na style).
 `contain' shows the whole picture with padding."
   :type '(choice (const cover) (const contain))
   :group 'denote-grid)
@@ -71,6 +71,11 @@
 (defcustom denote-grid-pdfinfo-executable "pdfinfo"
   "pdfinfo executable used to read PDF page for badges. Optional."
   :type 'string
+  :group 'denote-grid)
+
+(defcustom denote-grid-note-font-size 12
+  "Font size in pixels for text inside note cards.  Line height follows it."
+  :type 'integer
   :group 'denote-grid)
 
 (defcustom denote-grid-note-font-family "sans-serif"
@@ -513,7 +518,7 @@ Lines of heading paragraphs carry the text property `denote-grid-bold'."
     (nreverse lines)))
 
 (defun denote-grid--note-svg (item)
-  "Digital garden style text block: bordered box, body first, title as caption."
+  "Are.na style text block: bordered box, body first, title as caption."
   (let* ((w denote-grid-thumbnail-size) (h (denote-grid--card-height))
          (bg (denote-grid--bg))
          (fg (denote-grid--fg))
@@ -521,7 +526,7 @@ Lines of heading paragraphs carry the text property `denote-grid-bold'."
          (surface (denote-grid--mix bg fg 0.05))
          (border (denote-grid--mix bg fg 0.28))
          (font denote-grid-note-font-family)
-         (pad 14) (fs 12) (lh 17) (footer 30)
+         (pad 14) (fs denote-grid-note-font-size) (lh (round (* fs 1.42))) (footer 30)
          (chars (floor (- w (* 2 pad)) (* fs 0.56)))
          (body (denote-grid--get-snippet item))
          (empty (string-empty-p (string-trim body)))
@@ -1062,6 +1067,7 @@ Lines of heading paragraphs carry the text property `denote-grid-bold'."
         (denote-grid-item-type item) denote-grid-thumbnail-size
         (denote-grid--bg) (denote-grid--fg)
         denote-grid-card-aspect denote-grid-card-radius denote-grid-image-fit
+        denote-grid-note-font-size
         (denote-grid-item-count item)
         (and (eq (denote-grid-item-type item) 'text) (denote-grid--link-count item))))
 
